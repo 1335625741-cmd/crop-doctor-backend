@@ -475,7 +475,10 @@ def serve_upload(filepath):
 # ===== 鉴权 =====
 @app.before_request
 def check_auth():
-    PUBLIC_PATHS = {"/api/health"}
+    PUBLIC_PATHS = {"/api/health", "/admin", "/admin/login", "/api/wechat-login"}
+    # /api/admin/* 用自己的 admin token 鉴权(不放进 PUBLIC,但也不要全局 token 拦)
+    if request.path.startswith("/api/admin/"):
+        return None
     # 静态文件(uploads/)是用户自己上传的图片,wx:image src 不带 token,需要公开
     if request.path in PUBLIC_PATHS or request.path.startswith("/uploads/"):
         return None
@@ -495,7 +498,7 @@ def health():
     return jsonify({
         "ok": True,
         "ts": time.time(),
-        "version": "1.1.4",
+        "version": "1.2.0",
         "mode": "real" if real_backend else "demo",
         "real_backend": real_backend,
         "zhipu_configured": _zhipu_available(),
@@ -674,21 +677,86 @@ def diagnose():
         return jsonify({"ok": False, "error": "请上传图片或输入症状描述"}), 400
 
     use_real = request.args.get("real") == "1"
+    # ★ 诊断请求里的 openid(前端从 storage 透传过来)
+    openid = (request.form.get("openid") or "").strip() or None
+    print(f"[diag-route] use_real={use_real} has_text={bool(text_query)} has_img={len(image_files)>0} openid={openid}", file=sys.stderr)
 
     if image_files:
         # 图片模式
         if use_real and _zhipu_available():
-            return _diagnose_real(image_files)
+            return _save_diagnosis_then_return(
+                _diagnose_real(image_files), openid, image_count=len(image_files), is_text_only=False)
         elif use_real and _matrix_available():
-            return _diagnose_real(image_files)
-        return _diagnose_demo(image_files, text_query)
+            return _save_diagnosis_then_return(
+                _diagnose_real(image_files), openid, image_count=len(image_files), is_text_only=False)
+        return _save_diagnosis_then_return(
+            _diagnose_demo(image_files, text_query), openid, image_count=len(image_files), is_text_only=False)
     else:
         # 纯文字模式
         if use_real and _zhipu_available():
-            return _consult_real(text_query)
+            return _save_diagnosis_then_return(
+                _consult_real(text_query), openid, image_count=0, is_text_only=True)
         elif use_real and _matrix_available():
-            return _consult_real(text_query)
-        return _consult_demo(text_query)
+            return _save_diagnosis_then_return(
+                _consult_real(text_query), openid, image_count=0, is_text_only=True)
+        return _save_diagnosis_then_return(
+            _consult_demo(text_query), openid, image_count=0, is_text_only=True)
+
+
+def _save_diagnosis_then_return(resp, openid, image_count, is_text_only):
+    """从 resp(Flask Response)解析出诊断结果,入库一条 diagnoses,再原样返 resp
+
+    resp 是 _diagnose_real/_consult_real/_demo 返回的 jsonify 对象
+    """
+    try:
+        # 拿 resp 的 JSON 数据
+        data = resp.get_json() if hasattr(resp, 'get_json') else None
+        # ★ 诊断响应不一定有 'ok' 字段(后端 _diagnose_real / _consult_real 不主动加)
+        #    用 'diagnosis' 字段存在 + 不在 demo 模式 判定为有效
+        if not data:
+            print(f"[diag-save] skip: data=None, openid={openid}", file=sys.stderr)
+            return resp
+        is_demo_resp = bool(data.get('_is_demo'))  # demo 模式不入库
+        if is_demo_resp:
+            print(f"[diag-save] skip: demo mode, openid={openid}", file=sys.stderr)
+            return resp
+        if not data.get('diagnosis') and not data.get('_identified_crop'):
+            print(f"[diag-save] skip: no diagnosis or identified_crop, openid={openid}", file=sys.stderr)
+            return resp
+        # 兼容两种结构(嵌套 / 扁平)
+        diag_root = data.get('diagnosis') or {}
+        # 嵌套: { diagnosis: { diagnosis: [...], treatment, primary_crop } }
+        if isinstance(diag_root, dict):
+            diag = diag_root
+            top = (diag.get('diagnosis') or [{}])[0] if isinstance(diag.get('diagnosis'), list) else {}
+            primary_crop = diag.get('primary_crop') or {}
+            is_kb_hit = bool(data.get('_kb_hit') or data.get('_no_need_image'))
+            is_demo = bool(data.get('_is_demo') or diag.get('_is_demo'))
+        # 扁平: { diagnosis: [...], primary_crop, treatment, _kb_hit, ... }
+        else:
+            top = (diag_root[0] if isinstance(diag_root, list) and diag_root else {}) or {}
+            primary_crop = data.get('primary_crop') or {}
+            is_kb_hit = bool(data.get('_kb_hit') or data.get('_no_need_image'))
+            is_demo = bool(data.get('_is_demo'))
+        if openid:
+            _db.insert_diagnosis(
+                openid=openid,
+                crop=primary_crop.get('name_zh') if isinstance(primary_crop, dict) else None,
+                disease_name=top.get('name') if isinstance(top, dict) else None,
+                severity=top.get('severity') if isinstance(top, dict) else None,
+                probability=top.get('probability') if isinstance(top, dict) else None,
+                image_count=image_count,
+                is_text_only=is_text_only,
+                is_kb_hit=is_kb_hit,
+                is_demo=is_demo,
+                source='real' if not is_demo else 'demo',
+            )
+    except Exception as e:
+        import traceback
+        print(f"[diag-save] ⚠️ 入库失败: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+    print(f"[diag-save] saved: openid={openid}, image_count={image_count}, is_text={is_text_only}", file=sys.stderr)
+    return resp
 
 
 def _diagnose_demo(image_files, text_query=""):
@@ -950,29 +1018,46 @@ def _diagnose_real(image_files):
 # ===== 反馈 =====
 @app.route("/api/feedback", methods=["POST"])
 def feedback():
+    """提交反馈(存 SQLite, 取代原 feedback.jsonl)
+
+    payload 字段:
+      - openid: 用户 openid(可选,登录后透传)
+      - diagnosis_id: 关联 diagnoses.id(可选,前端从 /api/diagnose 拿到)
+      - key: 反馈选项(A/B/C/D/E)
+      - text: 自由文本
+      - crop: 作物名
+      - disease_name: 病名
+      - severity: 严重程度
+      - is_fallback: 是否离线模式
+    """
     try:
         data = request.get_json(force=True, silent=True) or {}
-        # ★ 接收前端送来的完整上下文(便于离线分析)
-        record = {
-            "ts": data.get("ts") or int(time.time() * 1000),
-            "key": data.get("key"),
-            "topDiagnosis": data.get("topDiagnosis") or data.get("topName"),
-            "cropName": data.get("cropName"),
-            "severity": data.get("severity"),
-            "probability": data.get("probability"),
-            "isFallback": bool(data.get("isFallback")),
-            "feedbackId": data.get("feedbackId"),
-            "messageId": data.get("messageId"),
-            "sessionId": data.get("sessionId"),  # ★ 关联 session
-            "remark": data.get("remark"),
-            "round": data.get("round") or 1,
-            "ip": request.headers.get("X-Forwarded-For", request.remote_addr),
-        }
-        with open(FEEDBACK_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        return jsonify({"ok": True})
+        # 兼容老字段(顶级字段)
+        openid = data.get("openid") or data.get("openId")
+        diagnosis_id = data.get("diagnosis_id") or data.get("diagnosisId")
+        key = data.get("key")
+        text = data.get("text") or data.get("remark")
+        crop = data.get("crop") or data.get("cropName")
+        disease_name = data.get("disease_name") or data.get("topDiagnosis") or data.get("topName")
+        severity = data.get("severity")
+        is_fallback = bool(data.get("is_fallback") or data.get("isFallback"))
+
+        # 写 SQLite
+        fb_id = _db.insert_feedback(
+            openid=openid,
+            diagnosis_id=diagnosis_id,
+            key=key,
+            text=text,
+            crop=crop,
+            disease_name=disease_name,
+            severity=severity,
+            is_fallback=is_fallback,
+        )
+        return jsonify({"ok": True, "id": fb_id})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return jsonify({"ok": False, "error": str(e), "traceback": traceback.format_exc()}), 500
 
 
 # ===== 微信快捷登录 =====
@@ -1001,6 +1086,18 @@ def wechat_login():
     # ★ 关键:没配 WECHAT_APPID / WECHAT_SECRET 时,直接走 demo
     if not WECHAT_APPID or not WECHAT_SECRET:
         fake_openid = "demo_" + code[:12] + "_" + str(int(time.time()))
+        # ★ 也入库一条 demo 用户记录(便于 admin 看 demo 用户)
+        try:
+            _db.upsert_user(
+                openid=fake_openid,
+                nickname=user_info_raw.get("nickName") or "体验用户",
+                avatar_url=user_info_raw.get("avatarUrl"),
+                device_model=data.get("deviceModel"),
+                wx_version=data.get("wxVersion"),
+                is_guest=True,
+            )
+        except Exception as e:
+            print(f"[登录] demo 入库失败: {e}", file=sys.stderr)
         return jsonify({
             "ok": True,
             "openid": fake_openid,
@@ -1070,6 +1167,23 @@ def wechat_login():
             else:
                 final_user_info["_decrypt_status"] = "failed:fallback to raw userInfo"
 
+        # ★ 存到 SQLite(用户表)
+        # 取前端透传的 device_model / wx_version(从 request.json 或 header 拿)
+        device_model = data.get("deviceModel") or data.get("device_model") or request.headers.get("X-Device-Model", "")
+        wx_version = data.get("wxVersion") or data.get("wx_version") or request.headers.get("X-WX-Version", "")
+        try:
+            _db.upsert_user(
+                openid=openid,
+                unionid=unionid or None,
+                nickname=final_user_info.get("nickname"),
+                avatar_url=final_user_info.get("avatar") if final_user_info.get("avatar", "").startswith("http") else None,
+                device_model=device_model or None,
+                wx_version=wx_version or None,
+                is_guest=False,
+            )
+        except Exception as e:
+            print(f"[登录] ⚠️ 入库失败(不影响登录): {e}", file=sys.stderr)
+
         return jsonify({
             "ok": True,
             "openid": openid,
@@ -1085,14 +1199,326 @@ def wechat_login():
 
 
 # ===== 启动 =====
+# 初始化 SQLite(每次启动建表)
+import db as _db
+_db.init_db()
+
+
+# ============================================================
+# Admin API(管理后台用)
+# ============================================================
+ADMIN_TOKEN = os.environ.get("CROP_DOCTOR_ADMIN_TOKEN", AUTH_TOKEN)  # 默认复用 AUTH_TOKEN
+
+
+def _check_admin():
+    """admin 鉴权(从 query 或 header 拿)"""
+    token = (request.args.get("admin_token") or
+             request.headers.get("X-Admin-Token", "")).strip()
+    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
+        return jsonify({"ok": False, "error": "admin unauthorized"}), 401
+    return None
+
+
+@app.route("/api/admin/stats", methods=["GET"])
+def admin_stats():
+    """总览统计"""
+    err = _check_admin()
+    if err: return err
+    return jsonify({"ok": True, "stats": _db.get_stats()})
+
+
+@app.route("/api/admin/users", methods=["GET"])
+def admin_users():
+    """用户列表"""
+    err = _check_admin()
+    if err: return err
+    limit = int(request.args.get("limit", 50))
+    offset = int(request.args.get("offset", 0))
+    users = _db.list_users(limit=limit, offset=offset)
+    total = _db.count_users()
+    return jsonify({"ok": True, "users": users, "total": total})
+
+
+@app.route("/api/admin/diagnoses", methods=["GET"])
+def admin_diagnoses():
+    """诊断历史"""
+    err = _check_admin()
+    if err: return err
+    limit = int(request.args.get("limit", 50))
+    offset = int(request.args.get("offset", 0))
+    openid = request.args.get("openid")
+    diags = _db.list_diagnoses(limit=limit, offset=offset, openid=openid)
+    total = _db.count_diagnoses(openid=openid)
+    return jsonify({"ok": True, "diagnoses": diags, "total": total})
+
+
+@app.route("/api/admin/feedbacks", methods=["GET"])
+def admin_feedbacks():
+    """反馈列表"""
+    err = _check_admin()
+    if err: return err
+    limit = int(request.args.get("limit", 50))
+    offset = int(request.args.get("offset", 0))
+    openid = request.args.get("openid")
+    fbs = _db.list_feedbacks(limit=limit, offset=offset, openid=openid)
+    total = _db.count_feedbacks(openid=openid)
+    return jsonify({"ok": True, "feedbacks": fbs, "total": total})
+
+
+# ============================================================
+# Admin HTML 页面
+# ============================================================
+_ADMIN_HTML = '''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>征途问诊 · 管理后台</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+       background: #f5f7fa; color: #1f2937; }
+.container { max-width: 1280px; margin: 0 auto; padding: 24px; }
+h1 { font-size: 24px; margin-bottom: 8px; }
+h2 { font-size: 18px; margin: 24px 0 12px; color: #374151; }
+.subtitle { color: #6b7280; font-size: 14px; margin-bottom: 16px; }
+.login-box { max-width: 400px; margin: 80px auto; padding: 32px; background: #fff;
+             border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
+.login-box h1 { text-align: center; margin-bottom: 24px; }
+.login-box input { width: 100%; padding: 12px; font-size: 15px; border: 1px solid #d1d5db;
+                  border-radius: 8px; margin-bottom: 12px; }
+.login-box button { width: 100%; padding: 12px; background: #10b981; color: #fff;
+                    border: none; border-radius: 8px; font-size: 15px; cursor: pointer; }
+.login-box button:hover { background: #059669; }
+.error { color: #ef4444; font-size: 13px; margin-top: 8px; text-align: center; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }
+.stat-card { background: #fff; padding: 20px; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.05); }
+.stat-label { color: #6b7280; font-size: 13px; }
+.stat-value { font-size: 32px; font-weight: 600; margin-top: 4px; color: #10b981; }
+.stat-sub { font-size: 12px; color: #9ca3af; margin-top: 4px; }
+.row { display: flex; gap: 16px; flex-wrap: wrap; }
+.section { background: #fff; padding: 20px; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+          flex: 1; min-width: 320px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #e5e7eb; }
+th { background: #f9fafb; font-weight: 600; color: #374151; }
+tr:hover { background: #f9fafb; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+.badge-success { background: #d1fae5; color: #065f46; }
+.badge-warn { background: #fef3c7; color: #92400e; }
+.badge-info { background: #dbeafe; color: #1e40af; }
+.tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+.tab { padding: 8px 16px; border-radius: 8px; background: #e5e7eb; cursor: pointer;
+       font-size: 14px; user-select: none; }
+.tab.active { background: #10b981; color: #fff; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.empty { color: #9ca3af; text-align: center; padding: 24px; font-size: 14px; }
+.fb-A { background: #d1fae5; }
+.fb-B { background: #ecfccb; }
+.fb-C { background: #fef9c3; }
+.fb-D { background: #fed7aa; }
+.fb-E { background: #fecaca; }
+.severity-高 { color: #ef4444; font-weight: 600; }
+.severity-中 { color: #f59e0b; }
+.severity-低 { color: #10b981; }
+.refresh-btn { float: right; padding: 6px 12px; background: #10b981; color: #fff;
+               border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.refresh-btn:hover { background: #059669; }
+.ts { color: #9ca3af; font-size: 12px; }
+.truncate { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="container" id="root">
+  <div id="loginView" class="login-box">
+    <h1>🌾 征途问诊管理后台</h1>
+    <p class="subtitle" style="text-align:center;margin-bottom:24px;">请输入 Admin Token 登录</p>
+    <input id="adminToken" type="password" placeholder="Admin Token (环境变量 CROP_DOCTOR_ADMIN_TOKEN)" />
+    <button onclick="doLogin()">登 录</button>
+    <div id="loginError" class="error"></div>
+  </div>
+  <div id="mainView" style="display:none;">
+    <h1>🌾 征途问诊管理后台</h1>
+    <p class="subtitle">用户 · 诊断 · 反馈 统计与分析</p>
+    <button class="refresh-btn" onclick="loadAll()">🔄 刷新全部</button>
+    <div class="tabs">
+      <div class="tab active" data-tab="overview" onclick="switchTab('overview')">📊 总览</div>
+      <div class="tab" data-tab="users" onclick="switchTab('users')">👤 用户</div>
+      <div class="tab" data-tab="diagnoses" onclick="switchTab('diagnoses')">🩺 诊断</div>
+      <div class="tab" data-tab="feedbacks" onclick="switchTab('feedbacks')">💬 反馈</div>
+    </div>
+    <div id="tab-overview" class="tab-content active"></div>
+    <div id="tab-users" class="tab-content"></div>
+    <div id="tab-diagnoses" class="tab-content"></div>
+    <div id="tab-feedbacks" class="tab-content"></div>
+  </div>
+</div>
+<script>
+let ADMIN_TOKEN = localStorage.getItem('admin_token') || '';
+function $(id) { return document.getElementById(id); }
+function doLogin() {
+  ADMIN_TOKEN = $('adminToken').value.trim();
+  if (!ADMIN_TOKEN) { $('loginError').textContent = '请输入 token'; return; }
+  localStorage.setItem('admin_token', ADMIN_TOKEN);
+  loadAll().then(() => {
+    if ($('mainView').style.display !== 'none') {
+      $('loginView').style.display = 'none';
+    }
+  }).catch(e => {
+    $('loginError').textContent = 'Token 错误或后端不可用: ' + e.message;
+    localStorage.removeItem('admin_token');
+  });
+}
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === 'tab-' + tab));
+}
+async function api(path) {
+  const sep = path.includes('?') ? '&' : '?';
+  const r = await fetch(path + sep + 'admin_token=' + encodeURIComponent(ADMIN_TOKEN));
+  if (r.status === 401) throw new Error('admin token 无效');
+  return r.json();
+}
+function fmtTs(ts) {
+  if (!ts) return '-';
+  return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false });
+}
+function renderOverview(s) {
+  const feedbackHtml = Object.entries(s.feedback_distribution || {}).map(
+    ([k, v]) => `<tr><td><span class="badge badge-info">${k}</span></td><td>${v}</td></tr>`
+  ).join('') || '<tr><td colspan="2" class="empty">暂无反馈</td></tr>';
+  const topDis = (s.top_diseases || []).map(d =>
+    `<tr><td>${d.name}</td><td>${d.count}</td></tr>`
+  ).join('') || '<tr><td colspan="2" class="empty">暂无数据</td></tr>';
+  const topCr = (s.top_crops || []).map(d =>
+    `<tr><td>${d.name}</td><td>${d.count}</td></tr>`
+  ).join('') || '<tr><td colspan="2" class="empty">暂无数据</td></tr>';
+  return `
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-label">总用户</div><div class="stat-value">${s.total_users}</div><div class="stat-sub">今日活跃 ${s.today_active} · 体验 ${s.guest_users}</div></div>
+      <div class="stat-card"><div class="stat-label">总诊断</div><div class="stat-value">${s.total_diagnoses}</div><div class="stat-sub">今日 ${s.today_diagnoses} · 图 ${s.image_diagnoses} · 文 ${s.text_diagnoses}</div></div>
+      <div class="stat-card"><div class="stat-label">KB 命中</div><div class="stat-value">${s.kb_hits}</div><div class="stat-sub">知识库直出,免智谱调用</div></div>
+      <div class="stat-card"><div class="stat-label">总反馈</div><div class="stat-value">${s.total_feedbacks}</div><div class="stat-sub">A-E 分布见右</div></div>
+    </div>
+    <div class="row">
+      <div class="section">
+        <h2>📈 Top 5 常见病</h2>
+        <table><thead><tr><th>病名</th><th>次数</th></tr></thead><tbody>${topDis}</tbody></table>
+      </div>
+      <div class="section">
+        <h2>🌾 Top 5 常见作物</h2>
+        <table><thead><tr><th>作物</th><th>次数</th></tr></thead><tbody>${topCr}</tbody></table>
+      </div>
+      <div class="section">
+        <h2>💬 反馈分布</h2>
+        <table><thead><tr><th>选项</th><th>数量</th></tr></thead><tbody>${feedbackHtml}</tbody></table>
+      </div>
+    </div>
+  `;
+}
+function renderUsers(data) {
+  if (!data.users || !data.users.length) return '<div class="empty">暂无用户</div>';
+  return `<div class="section"><h2>👤 用户列表 (共 ${data.total})</h2>
+    <table><thead><tr><th>openid</th><th>昵称</th><th>设备</th><th>登录数</th><th>最后活跃</th><th>注册时间</th></tr></thead><tbody>
+    ${data.users.map(u => `<tr>
+      <td class="truncate" title="${u.openid}">${u.openid}</td>
+      <td>${u.nickname || '-'}</td>
+      <td>${u.device_model || '-'}</td>
+      <td>${u.login_count}</td>
+      <td class="ts">${fmtTs(u.last_active_at)}</td>
+      <td class="ts">${fmtTs(u.login_at)}</td>
+    </tr>`).join('')}
+    </tbody></table></div>`;
+}
+function renderDiagnoses(data) {
+  if (!data.diagnoses || !data.diagnoses.length) return '<div class="empty">暂无诊断</div>';
+  return `<div class="section"><h2>🩺 诊断历史 (共 ${data.total})</h2>
+    <table><thead><tr><th>时间</th><th>openid</th><th>作物</th><th>病名</th><th>严重度</th><th>概率</th><th>类型</th><th>来源</th></tr></thead><tbody>
+    ${data.diagnoses.map(d => `<tr>
+      <td class="ts">${fmtTs(d.ts)}</td>
+      <td class="truncate" title="${d.openid || ''}">${d.openid || '-'}</td>
+      <td>${d.crop || '-'}</td>
+      <td>${d.disease_name || '-'}</td>
+      <td><span class="severity-${d.severity || ''}">${d.severity || '-'}</span></td>
+      <td>${d.probability != null ? (d.probability * 100).toFixed(0) + '%' : '-'}</td>
+      <td>${d.is_text_only ? '文字' : (d.image_count + '图')}</td>
+      <td>${d.is_kb_hit ? '<span class="badge badge-success">KB</span>' : (d.is_demo ? '<span class="badge badge-warn">demo</span>' : '<span class="badge badge-info">AI</span>')}</td>
+    </tr>`).join('')}
+    </tbody></table></div>`;
+}
+function renderFeedbacks(data) {
+  if (!data.feedbacks || !data.feedbacks.length) return '<div class="empty">暂无反馈</div>';
+  return `<div class="section"><h2>💬 反馈列表 (共 ${data.total})</h2>
+    <table><thead><tr><th>时间</th><th>openid</th><th>选项</th><th>病名</th><th>严重度</th><th>文本</th></tr></thead><tbody>
+    ${data.feedbacks.map(f => `<tr>
+      <td class="ts">${fmtTs(f.ts)}</td>
+      <td class="truncate" title="${f.openid || ''}">${f.openid || '-'}</td>
+      <td><span class="badge fb-${f.key}">${f.key || '-'}</span></td>
+      <td>${f.disease_name || '-'}</td>
+      <td><span class="severity-${f.severity || ''}">${f.severity || '-'}</span></td>
+      <td>${f.text || '-'}</td>
+    </tr>`).join('')}
+    </tbody></table></div>`;
+}
+async function loadAll() {
+  if (!ADMIN_TOKEN) { $('mainView').style.display = 'none'; $('loginView').style.display = 'block'; return; }
+  const [stats, users, diags, fbs] = await Promise.all([
+    api('/api/admin/stats'),
+    api('/api/admin/users'),
+    api('/api/admin/diagnoses'),
+    api('/api/admin/feedbacks'),
+  ]);
+  $('loginView').style.display = 'none';
+  $('mainView').style.display = 'block';
+  $('tab-overview').innerHTML = renderOverview(stats.stats);
+  $('tab-users').innerHTML = renderUsers(users);
+  $('tab-diagnoses').innerHTML = renderDiagnoses(diags);
+  $('tab-feedbacks').innerHTML = renderFeedbacks(fbs);
+}
+if (ADMIN_TOKEN) loadAll();
+</script>
+</body>
+</html>'''
+
+
+@app.route("/admin", methods=["GET"])
+def admin_page():
+    """管理后台 HTML(简单密码保护)"""
+    # 用 query 参数 ?admin_token=xxx 或 cookie 鉴权
+    token = (request.args.get("admin_token") or
+             request.cookies.get("admin_token") or
+             "").strip()
+    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
+        # 返登录页(包含 token 输入框)
+        return _ADMIN_HTML.replace('id="mainView" style="display:none;"', 'id="mainView" style="display:none;"'), 200
+    return _ADMIN_HTML, 200
+
+
+@app.route("/admin/login", methods=["POST"])
+def admin_login():
+    """admin 登录(返回 cookie)"""
+    data = request.get_json(force=True, silent=True) or {}
+    token = (data.get("admin_token") or "").strip()
+    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
+        return jsonify({"ok": False, "error": "token 错误"}), 401
+    resp = jsonify({"ok": True})
+    resp.set_cookie("admin_token", token, max_age=86400, httponly=True, samesite="Lax")
+    return resp
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8765"))
     print(f"征途问诊后端启动: http://0.0.0.0:{port}", file=sys.stderr)
     print(f"  GET  /api/health         - 健康检查(公开)", file=sys.stderr)
     print(f"  POST /api/identify       - 作物识别(默认 demo,?real=1 走真 AI)", file=sys.stderr)
     print(f"  POST /api/diagnose       - 病害诊断(自动 chain identify,?real=1 走真 AI)", file=sys.stderr)
-    print(f"  POST /api/feedback       - 提交反馈(需 X-Auth-Token)", file=sys.stderr)
-    print(f"  POST /api/wechat-login   - 微信快捷登录(可选 WECHAT_APPID+SECRET)", file=sys.stderr)
+    print(f"  POST /api/feedback       - 提交反馈(需 X-Auth-Token,SQLite 持久化)", file=sys.stderr)
+    print(f"  POST /api/wechat-login   - 微信快捷登录(存 SQLite users 表)", file=sys.stderr)
+    print(f"  GET  /api/admin/stats    - 管理后台统计(需 admin token)", file=sys.stderr)
+    print(f"  GET  /api/admin/users    - 用户列表(需 admin token)", file=sys.stderr)
+    print(f"  GET  /api/admin/diagnoses- 诊断历史(需 admin token)", file=sys.stderr)
+    print(f"  GET  /api/admin/feedbacks- 反馈列表(需 admin token)", file=sys.stderr)
+    print(f"  GET  /admin              - 管理后台 HTML(简单密码保护)", file=sys.stderr)
     if AUTH_TOKEN:
         print(f"  Token 鉴权:已启用(token 长度: {len(AUTH_TOKEN)})", file=sys.stderr)
     else:

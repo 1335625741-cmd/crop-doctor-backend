@@ -5,6 +5,10 @@ check_*.py
 parse_*.py
 build_*.py
 skill_prescription_parsed.json
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 *.pyc
 *.pyo
 *.pyd
