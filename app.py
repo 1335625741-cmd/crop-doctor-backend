@@ -403,7 +403,7 @@ def health():
     return jsonify({
         "ok": True,
         "ts": time.time(),
-        "version": "1.1.0",
+        "version": "1.1.1",
         "mode": "real" if real_backend else "demo",
         "real_backend": real_backend,
         "zhipu_configured": _zhipu_available(),
@@ -762,10 +762,13 @@ def _diagnose_real(image_files):
         return jsonify(full)
     except Exception as e:
         import traceback
-        traceback.print_exc()
+        tb = traceback.format_exc()
+        print(tb, file=sys.stderr)
         return jsonify({
             "ok": False,
             "error": "诊断服务异常: " + str(e),
+            "traceback": tb[-2000:],  # 最近 2000 字符
+            "type": type(e).__name__,
         }), 500
     finally:
         try:
