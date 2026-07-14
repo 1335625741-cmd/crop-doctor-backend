@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+test_*.py
 *.pyc
 *.pyo
 *.pyd

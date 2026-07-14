@@ -27,6 +27,7 @@ server/app.py — 征途问诊小程序后端
 import base64
 import hashlib
 import json
+import disease_kb
 import os
 import shutil
 import threading
@@ -327,6 +328,65 @@ CONSULT_PROMPT_TEMPLATE = """你是资深作物病虫害诊断专家。用户没
 }}
 
 只输出 JSON。注意 need_expert 通常为 true(没有图,建议补图 + 找专家)。"""
+
+
+def _build_response_from_kb(kb_match, text_query):
+    """从知识库命中数据构建标准响应结构(扁平,文字问诊格式)
+
+    知识库结构(简洁):
+      {category, pathogen, severity, key_visual_clues, actions, prescription{...}}
+
+    标准文字问诊响应(扁平,前端 parser 会 normalize):
+      { primary_crop, diagnosis:[], treatment:{...}, _kb_hit, _no_need_image, ... }
+    """
+    data = kb_match["data"]
+    canonical = kb_match["canonical_name"]
+
+    # 从病名提取作物名(简单启发式:取前 2 字符,在常见作物名集合里)
+    common_crops = ["玉米", "水稻", "小麦", "番茄", "黄瓜", "辣椒", "茄子", "白菜", "萝卜",
+                    "马铃薯", "苹果", "葡萄", "柑橘", "茶叶", "草莓", "花生", "大豆", "桃", "梨"]
+    crop = canonical[:2]
+    for c in common_crops:
+        if canonical.startswith(c):
+            crop = c
+            break
+
+    diagnosis = [{
+        "name": canonical,
+        "probability": 0.85,  # 知识库命中,置信度较高
+        "severity": data.get("severity", "中"),
+        "reasoning": f"知识库匹配:用户文字问诊命中「{canonical}」,直接给出标准治疗方案(数据来源:中国农技推广中心公开技术资料)",
+        "key_visual_clues": data.get("key_visual_clues", []),
+        "uncertainty_reason": f"基于用户文字描述的初步判断,建议结合田间实际情况;如有图片可二次确认病斑细节",
+        "need_expert": data.get("severity") == "高",
+    }]
+
+    treatment = {
+        "title": f"{canonical}治疗方案",
+        "actions": data.get("actions", []),
+        "prescription": data.get("prescription", {}),
+    }
+
+    return {
+        "primary_crop": {"name_zh": crop, "confidence": 0.9},
+        "diagnosis": diagnosis,
+        "treatment": treatment,
+        "is_crop": True,
+        "_is_demo": False,
+        "_is_text_only": True,
+        "_kb_hit": True,            # 知识库命中标志
+        "_no_need_image": True,     # 前端隐藏"补图"提示
+        "_identified_crop": {
+            "primary_crop": {"name_zh": crop, "confidence": 0.9},
+            "candidates": [],
+        },
+        "_chain": {
+            "stage1_identified_by": "text_kb",
+            "stage2_diagnosed_by": "disease_kb",
+            "identified_crop_name": crop,
+            "auto_chainable": True,
+        },
+    }
 
 
 def _build_consult_prompt(text_query):
@@ -713,11 +773,22 @@ def _consult_demo(text_query):
 
 
 def _consult_real(text_query):
-    """文字问诊真实模式:调智谱 GLM-4V 文字版"""
+    """文字问诊真实模式:
+    1. 先查 disease_kb(常见病知识库),命中 → 直接出方案,不再要求补图
+    2. 不命中 → 调智谱 GLM-4V 文字版,根据用户描述给出诊断
+    """
+    # ★ 1. 知识库直出(零延迟,覆盖 45 个常见病/虫害/缺素/药害)
+    kb_match = disease_kb.search_kb(text_query)
+    if kb_match and kb_match["matched"]:
+        print(f"[kb] hit: '{text_query[:30]}' -> {kb_match['canonical_name']}", file=sys.stderr)
+        result = _build_response_from_kb(kb_match, text_query)
+        return jsonify(result)
+
+    # 2. 兜底:调智谱文字版
     try:
         prompt = _build_consult_prompt(text_query)
         # 文字问诊无图,传空 list(智谱 glm-4v-plus max_tokens 1-2048)
-        print(f"[zhipu] consult: text='{text_query[:50]}'", file=sys.stderr)
+        print(f"[zhipu] consult (no kb match): text='{text_query[:50]}'", file=sys.stderr)
         result = _call_zhipu_glm4v([], prompt, max_tokens=1500, timeout=45)
         # 兜底
         result.setdefault("is_crop", True)
