@@ -41,7 +41,7 @@ except ImportError:
     raise
 
 try:
-    from flask import Flask, request, jsonify
+    from flask import Flask, request, jsonify, send_file
     from flask_cors import CORS
 except ImportError:
     print("需要安装: pip install flask flask-cors", file=sys.stderr)
@@ -384,6 +384,19 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 FEEDBACK_FILE = SCRIPT_DIR / "feedback.jsonl"
 
 
+# ===== 静态文件服务(让前端能拿到上传的原图,做"已上传图片预览") =====
+@app.route("/uploads/<path:filepath>")
+def serve_upload(filepath):
+    """serve UPLOAD_DIR 下的图片,供前端 wx:image 组件直接 src"""
+    # 安全:防止路径穿越(只能访问 UPLOAD_DIR 下文件)
+    target = (UPLOAD_DIR / filepath).resolve()
+    if not str(target).startswith(str(UPLOAD_DIR.resolve())):
+        return jsonify({"ok": False, "error": "path traversal blocked"}), 403
+    if not target.exists() or not target.is_file():
+        return jsonify({"ok": False, "error": "file not found"}), 404
+    return send_file(str(target))
+
+
 # ===== 鉴权 =====
 @app.before_request
 def check_auth():
@@ -406,7 +419,7 @@ def health():
     return jsonify({
         "ok": True,
         "ts": time.time(),
-        "version": "1.1.1",
+        "version": "1.1.2",
         "mode": "real" if real_backend else "demo",
         "real_backend": real_backend,
         "zhipu_configured": _zhipu_available(),
@@ -769,6 +782,20 @@ def _diagnose_real(image_files):
             pres_lines.append(f"\n📅 **复喷节奏**:{pres['followup']}")
         pres_content = "\n".join(pres_lines) if pres_lines else ""
 
+        # ★ 图片 URL:用 HTTP URL(前端 image 组件可访问)
+        # 路径形式: {PUBLIC_BASE_URL}/uploads/{session_dir_name}/{idx}.{ext}
+        public_base = os.environ.get("PUBLIC_BASE_URL", "https://crop-doctor-backend-5ejy.onrender.com").rstrip("/")
+        image_urls = []
+        for p in saved_paths:
+            # p 形如 /tmp/crop_doctor_uploads/diagnose-1234567890/0.jpg
+            # 取 "diagnose-1234567890/0.jpg" 作为 URL 路径
+            try:
+                rel = Path(p).relative_to(UPLOAD_DIR).as_posix()
+            except Exception:
+                # 兜底:取 basename 拼
+                rel = Path(p).name
+            image_urls.append(f"{public_base}/uploads/{rel}")
+
         full = {
             "diagnosis": diagnosis,
             "top_diagnosis_name": top_name,
@@ -779,7 +806,7 @@ def _diagnose_real(image_files):
             },
             "metadata": {
                 "image_count": len(saved_paths),
-                "images": [p.replace("\\", "/") for p in saved_paths],
+                "images": image_urls,
                 "crop": crop or diagnosis.get("primary_crop", {}).get("name_zh"),
                 "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 "backend": "zhipu-glm4v",
