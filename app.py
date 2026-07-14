@@ -105,8 +105,11 @@ def _call_zhipu_glm4v(image_paths, prompt, max_tokens=2048, timeout=60):
     # 把所有图片转 base64
     content = []
     for p in image_paths:
-        with open(p, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("utf-8")
+        raw = open(p, "rb").read()
+        # 调试: 报告文件大小和首尾字节
+        print(f"[zhipu] img {p}: size={len(raw)} head={raw[:8].hex()} tail={raw[-8:].hex()}", file=sys.stderr)
+        b64 = base64.b64encode(raw).decode("ascii")
+        print(f"[zhipu] img {p}: b64_len={len(b64)} b64_head={b64[:60]}... b64_tail=...{b64[-40:]}", file=sys.stderr)
         # GLM-4V 支持 jpeg/png/webp
         ext = Path(p).suffix.lower().lstrip(".") or "jpeg"
         mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp"}.get(ext, "jpeg")
