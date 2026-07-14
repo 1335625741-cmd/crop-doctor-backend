@@ -1,0 +1,30 @@
+# ============================================================
+# Render Blueprint 配置
+# https://render.com/docs/blueprint-spec
+# 用途:Web Service(免费层,cpu basic 共享,够 demo 跑)
+# ============================================================
+services:
+  - type: web
+    name: crop-doctor-backend
+    runtime: docker
+    plan: free
+    # Region: singapore(国内访问延迟低)
+    region: singapore
+    # Docker build 路径: 根目录(本 yaml 所在)
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Health check 路径(必须 /api/health 返 200)
+    healthCheckPath: /api/health
+    # 自动部署:main 分支 push 触发自动部署
+    autoDeploy: true
+    envVars:
+      # 必填:跟小程序 app.js 的 authToken 一致
+      - key: CROP_DOCTOR_TOKEN
+        value: dev-local-token-123
+      # 微信小程序 AppID(普通 env,不需 Secret)
+      - key: WECHAT_APPID
+        value: wx55ada0c10001558a
+      # 微信小程序 AppSecret(必须 Secret,UI 配)
+      # Render 部署后再到控制台配 WECHAT_SECRET 真实值
+      - key: WECHAT_SECRET
+        sync: false

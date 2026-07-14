@@ -1,0 +1,7 @@
+flask>=2.0
+flask-cors>=3.0
+# 微信登录时解密 encryptedData(用 session_key 解密,需要 AES-256-CBC)
+# 可选:不装也能跑,只是 encryptedData 解密失败时降级用前端明文 userInfo
+cryptography>=3.0
+# 生产 WSGI 服务器(部署到 Hugging Face Spaces / Docker 时用)
+gunicorn>=21.0

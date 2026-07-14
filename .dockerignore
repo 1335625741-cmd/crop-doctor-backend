@@ -1,0 +1,40 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# 日志和运行时数据
+*.log
+*.jsonl
+feedback.jsonl
+server.log
+server-error.log
+
+# 编辑器 / 系统
+.DS_Store
+.vscode/
+.idea/
+Thumbs.db
+*.swp
+*.swo
+
+# 本地启动脚本(Docker 用 CMD 启动,不需要这些)
+start-local.bat
+start-local.sh
+_patch_*.py
+_check_*.py
+_check_*.pyc
+
+# 文档
+README.md
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# 部署配置(部署到 Render 时用 render.yaml)
+render.yaml
