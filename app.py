@@ -488,7 +488,7 @@ def _identify_real(image_files):
 
         prompt = IDENTIFY_PROMPT_TEMPLATE + extra_text
 
-        # 调智谱
+        # 调智谱(max_tokens 1-2048,智谱 glm-4v-plus 限制)
         print(f"[zhipu] identify: {len(saved_paths)} 张图", file=sys.stderr)
         result = _call_zhipu_glm4v(saved_paths, prompt, max_tokens=1500, timeout=45)
         # 兜底字段
@@ -629,9 +629,9 @@ def _consult_real(text_query):
     """文字问诊真实模式:调智谱 GLM-4V 文字版"""
     try:
         prompt = _build_consult_prompt(text_query)
-        # 文字问诊无图,传空 list
+        # 文字问诊无图,传空 list(智谱 glm-4v-plus max_tokens 1-2048)
         print(f"[zhipu] consult: text='{text_query[:50]}'", file=sys.stderr)
-        result = _call_zhipu_glm4v([], prompt, max_tokens=2000, timeout=45)
+        result = _call_zhipu_glm4v([], prompt, max_tokens=1500, timeout=45)
         # 兜底
         result.setdefault("is_crop", True)
         result.setdefault("primary_crop", {"name_zh": "未知", "confidence": 0.3})
@@ -689,8 +689,9 @@ def _diagnose_real(image_files):
         prompt = _build_diagnose_prompt(text_query)
 
         # 调智谱 GLM-4V(单次调用,一次性输出识别+诊断+方案)
+        # 智谱 glm-4v-plus 限制 max_tokens 1-2048
         print(f"[zhipu] diagnose: {len(saved_paths)} 张图, text='{text_query[:50]}'", file=sys.stderr)
-        diagnosis = _call_zhipu_glm4v(saved_paths, prompt, max_tokens=2500, timeout=60)
+        diagnosis = _call_zhipu_glm4v(saved_paths, prompt, max_tokens=2000, timeout=60)
 
         # 兜底字段
         diagnosis.setdefault("is_crop", True)
