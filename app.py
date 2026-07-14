@@ -495,7 +495,7 @@ def health():
     return jsonify({
         "ok": True,
         "ts": time.time(),
-        "version": "1.1.2",
+        "version": "1.1.3",
         "mode": "real" if real_backend else "demo",
         "real_backend": real_backend,
         "zhipu_configured": _zhipu_available(),
