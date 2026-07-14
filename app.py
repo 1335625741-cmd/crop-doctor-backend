@@ -394,7 +394,20 @@ def serve_upload(filepath):
     if not str(target).startswith(str(UPLOAD_DIR.resolve())):
         return jsonify({"ok": False, "error": "path traversal blocked"}), 403
     if not target.exists() or not target.is_file():
-        return jsonify({"ok": False, "error": "file not found", "target": str(target), "upload_dir": str(UPLOAD_DIR)}), 404
+        # debug: 列 UPLOAD_DIR 实际有什么
+        siblings = []
+        try:
+            for p in UPLOAD_DIR.iterdir():
+                siblings.append(p.name)
+        except Exception as e:
+            siblings = [f"<list err: {e}>"]
+        return jsonify({
+            "ok": False,
+            "error": "file not found",
+            "target": str(target),
+            "upload_dir": str(UPLOAD_DIR),
+            "siblings_in_upload_dir": siblings[:20],
+        }), 404
     return send_file(str(target))
 
 
