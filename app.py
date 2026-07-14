@@ -680,18 +680,22 @@ def _consult_real(text_query):
 def _diagnose_real(image_files):
     """真实模式:调智谱 GLM-4V,单次输出 identify + diagnose + treatment"""
     saved_paths, session_dir = _save_images_to_tmp(image_files, prefix="diagnose")
+    print(f"[diag] _diagnose_real start, {len(saved_paths)} images", file=sys.stderr)
     try:
         text_query = (request.form.get("text") or "").strip()
         crop = (request.form.get("crop") or "").strip()
         parts = (request.form.get("parts") or "").strip()
+        print(f"[diag] form text='{text_query[:30]}' crop='{crop}'", file=sys.stderr)
 
         # 构造 diagnose prompt
         prompt = _build_diagnose_prompt(text_query)
+        print(f"[diag] prompt len={len(prompt)}", file=sys.stderr)
 
         # 调智谱 GLM-4V(单次调用,一次性输出识别+诊断+方案)
         # 智谱 glm-4v-plus 限制 max_tokens 1-2048
         print(f"[zhipu] diagnose: {len(saved_paths)} 张图, text='{text_query[:50]}'", file=sys.stderr)
         diagnosis = _call_zhipu_glm4v(saved_paths, prompt, max_tokens=2000, timeout=60)
+        print(f"[diag] zhipu OK, keys={list(diagnosis.keys())}", file=sys.stderr)
 
         # 兜底字段
         diagnosis.setdefault("is_crop", True)
