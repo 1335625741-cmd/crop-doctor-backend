@@ -5,3 +5,5 @@ flask-cors>=3.0
 cryptography>=3.0
 # 生产 WSGI 服务器(部署到 Hugging Face Spaces / Docker 时用)
 gunicorn>=21.0
+# 调智谱 GLM-4V API(Render 上跑真 AI)
+requests>=2.28

@@ -28,3 +28,10 @@ services:
       # Render 部署后再到控制台配 WECHAT_SECRET 真实值
       - key: WECHAT_SECRET
         sync: false
+      # 智谱 GLM-4V API key(真 AI 链路)
+      # 注册:https://open.bigmodel.cn/ → API keys
+      - key: ZHIPU_API_KEY
+        sync: false
+      # 智谱模型(可选,默认 glm-4v-plus)
+      - key: ZHIPU_MODEL
+        value: glm-4v-plus

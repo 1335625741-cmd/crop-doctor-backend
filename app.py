@@ -24,6 +24,7 @@ server/app.py — 征途问诊小程序后端
 鉴权:
   - 环境变量 CROP_DOCTOR_TOKEN 必须配
 """
+import base64
 import hashlib
 import json
 import os
@@ -32,6 +33,12 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+try:
+    import requests as _requests
+except ImportError:
+    print("需要安装: pip install requests", file=sys.stderr)
+    raise
 
 try:
     from flask import Flask, request, jsonify
@@ -65,6 +72,250 @@ ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("CROP_DOCTOR_ORIGINS", "").
 # 在微信公众平台 → 开发 → 开发管理 → 开发设置 → 小程序 AppID / AppSecret
 WECHAT_APPID = os.environ.get("WECHAT_APPID", "").strip()
 WECHAT_SECRET = os.environ.get("WECHAT_SECRET", "").strip()
+
+# 智谱 GLM-4V API(用于真 AI 诊断,Render 部署必备)
+# 注册:https://open.bigmodel.cn/  → API keys
+ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY", "").strip()
+ZHIPU_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+ZHIPU_MODEL = os.environ.get("ZHIPU_MODEL", "glm-4v-plus").strip()  # 默认 glm-4v-plus
+
+
+def _zhipu_available():
+    """检查智谱 API key 是否配置"""
+    return bool(ZHIPU_API_KEY)
+
+
+def _call_zhipu_glm4v(image_paths, prompt, max_tokens=2048, timeout=60):
+    """
+    调智谱 GLM-4V API,带图片的多模态对话
+    输入:
+      - image_paths: 图片绝对路径列表(支持多图)
+      - prompt: 文本 prompt(详细指令)
+      - max_tokens: 最大输出 token
+      - timeout: 超时秒
+    返回:
+      - 解析后的 JSON dict(模型直接输出 JSON)
+    抛出:
+      - requests.RequestException: 网络错误
+      - ValueError: 解析错误 / 模型返回非 JSON
+    """
+    if not _zhipu_available():
+        raise RuntimeError("ZHIPU_API_KEY 未配置")
+
+    # 把所有图片转 base64
+    content = []
+    for p in image_paths:
+        with open(p, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+        # GLM-4V 支持 jpeg/png/webp
+        ext = Path(p).suffix.lower().lstrip(".") or "jpeg"
+        mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp"}.get(ext, "jpeg")
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/{mime};base64,{b64}"}
+        })
+    content.append({"type": "text", "text": prompt})
+
+    headers = {
+        "Authorization": f"Bearer {ZHIPU_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": ZHIPU_MODEL,
+        "messages": [{"role": "user", "content": content}],
+        "temperature": 0.2,
+        "max_tokens": max_tokens,
+        # 智谱支持 response_format 强制 JSON(2024+ 多数模型支持)
+        # 但 glm-4v-plus 暂不完全支持,降级用 prompt 引导
+        # "response_format": {"type": "json_object"},
+    }
+    r = _requests.post(ZHIPU_API_URL, headers=headers, json=payload, timeout=timeout)
+    if r.status_code != 200:
+        raise RuntimeError(f"智谱 API HTTP {r.status_code}: {r.text[:300]}")
+    resp = r.json()
+    if "error" in resp:
+        raise RuntimeError(f"智谱 API 错误: {resp['error']}")
+    if "choices" not in resp or not resp["choices"]:
+        raise RuntimeError(f"智谱 API 无 choices: {resp}")
+    text = resp["choices"][0]["message"]["content"]
+    # 智谱模型可能返回 ```json ... ``` 代码块,strip 一下
+    text = text.strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    if text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+    return json.loads(text)
+
+
+# ===== 智谱 GLM-4V prompt 模板 =====
+IDENTIFY_PROMPT_TEMPLATE = """你是作物识别专家,只识别以下常见作物:
+番茄、黄瓜、辣椒、茄子、西瓜、草莓、马铃薯、苹果、葡萄、柑橘、水稻、小麦、玉米、大豆、花生、茶叶。
+
+【任务】仔细看图,判断是什么作物。
+
+【输出 JSON 格式(严格,不要任何其他文字)】
+{
+  "is_crop": true,
+  "primary_crop": {
+    "name_zh": "番茄",
+    "scientific_name": "Solanum lycopersicum",
+    "family": "茄科 Solanaceae",
+    "category": "果菜类",
+    "confidence": 0.85
+  },
+  "candidates": [
+    {"name_zh": "茄子", "confidence": 0.10},
+    {"name_zh": "辣椒", "confidence": 0.05}
+  ],
+  "reasoning": "1-2 句判断依据(看叶片/果实/株型等特征)",
+  "downstream_skills": [
+    {"name": "crop-disease-diagnosis", "auto_chainable": true}
+  ]
+}
+
+如果图里没有作物(is_crop=false):
+{
+  "is_crop": false,
+  "primary_crop": {"name_zh": "非作物", "confidence": 0.0},
+  "candidates": [],
+  "reasoning": "图片不是作物"
+}
+
+只输出 JSON,不要 markdown 包裹。"""
+
+
+DIAGNOSE_PROMPT_TEMPLATE = """你是资深作物病虫害诊断专家。基于图片{{ and 用户描述:"{text_query}" }}输出结构化 JSON 诊断。
+
+【诊断流程】
+1. 仔细看图片:病斑形态/位置/颜色/分布/有无虫体/整株状态
+2. 综合判断:作物 + 病害/虫害/缺素/生理障碍
+3. 给出 1 个主诊断 + 1-2 个候选,概率要拉开
+4. 输出可执行治疗方案
+
+【输出 JSON 格式(严格,不要任何其他文字)】
+{
+  "is_crop": true,
+  "primary_crop": {
+    "name_zh": "番茄",
+    "scientific_name": "Solanum lycopersicum",
+    "family": "茄科 Solanaceae",
+    "category": "果菜类",
+    "confidence": 0.9
+  },
+  "candidates": [
+    {"name_zh": "茄子", "confidence": 0.05},
+    {"name_zh": "辣椒", "confidence": 0.05}
+  ],
+  "diagnosis": [
+    {
+      "name": "番茄早疫病",
+      "probability": 0.75,
+      "severity": "中",
+      "reasoning": "叶片有深褐色圆形病斑,带同心轮纹,符合早疫病典型特征",
+      "key_visual_clues": ["深褐色圆形病斑", "同心轮纹", "病斑周围黄化"],
+      "uncertainty_reason": "图片清晰度有限,需进一步确认病斑发展阶段",
+      "need_expert": false
+    },
+    {
+      "name": "番茄晚疫病",
+      "probability": 0.20,
+      "severity": "中",
+      "reasoning": "...",
+      "key_visual_clues": ["..."],
+      "uncertainty_reason": "...",
+      "need_expert": false
+    }
+  ],
+  "treatment": {
+    "title": "番茄早疫病治疗方案",
+    "actions": [
+      {"step": 1, "title": "摘除病叶", "description": "摘除最严重的病叶并带出田块销毁"},
+      {"step": 2, "title": "加强通风降湿", "description": "降低田间湿度,提高通风"},
+      {"step": 3, "title": "化学防治", "description": "见下方药剂处方"}
+    ],
+    "prescription": {
+      "title": "药剂处方",
+      "chemicals": [
+        {
+          "name": "75% 百菌清可湿性粉剂",
+          "dose": "500-800 倍液",
+          "method": "叶面喷雾",
+          "interval_days": 7,
+          "max_times": 3,
+          "preharvest_days": 7
+        }
+      ],
+      "safety_warning": "严格按说明书使用,注意防护,采收前 7 天停药",
+      "followup": "7 天后复查,若病情继续发展立即换药"
+    }
+  }
+}
+
+注意:
+- probability 是 0-1 之间的小数(主诊断 0.6-0.9,候选 0.05-0.3)
+- 候选最多 2 个
+- need_expert: true 表示建议找农技专家(严重或不确定时)
+- severity: 轻/中/重
+- treatment.actions 至少 3 步
+- 药剂至少 1 种,按规范写
+
+只输出 JSON。"""
+
+
+def _build_diagnose_prompt(text_query):
+    """构造 diagnose prompt,带可选 text 描述"""
+    if text_query:
+        return DIAGNOSE_PROMPT_TEMPLATE.replace("{text_query}", text_query)
+    else:
+        return DIAGNOSE_PROMPT_TEMPLATE.replace('{{ and 用户描述:"{text_query}" }}', '').replace("{text_query}", "")
+
+
+CONSULT_PROMPT_TEMPLATE = """你是资深作物病虫害诊断专家。用户没有发图,只有文字描述,你需要基于症状描述做诊断。
+
+用户描述:{text_query}
+
+【任务】综合判断可能是什么病害/虫害/缺素症/生理障碍。
+
+【输出 JSON 格式(严格)】
+{{
+  "is_crop": true,
+  "primary_crop": {{"name_zh": "(从描述推断,如不明确填'未知')", "confidence": 0.5}},
+  "candidates": [],
+  "diagnosis": [
+    {{
+      "name": "可能病害名",
+      "probability": 0.7,
+      "severity": "中",
+      "reasoning": "基于症状描述的判断依据",
+      "key_visual_clues": ["用户提到的症状"],
+      "uncertainty_reason": "没有图片,建议用户补图确认",
+      "need_expert": true
+    }}
+  ],
+  "treatment": {{
+    "title": "建议方案",
+    "actions": [
+      {{"step": 1, "title": "补图", "description": "上传 1-3 张清晰照片获取精准诊断"}},
+      {{"step": 2, "title": "观察", "description": "记录症状发展(扩散?好转?)"}}
+    ],
+    "prescription": {{
+      "title": "初步建议(需补图确认)",
+      "chemicals": [],
+      "safety_warning": "未确诊前不建议盲目用药",
+      "followup": "上传图片后免费重跑诊断"
+    }}
+  }}
+}}
+
+只输出 JSON。注意 need_expert 通常为 true(没有图,建议补图 + 找专家)。"""
+
+
+def _build_consult_prompt(text_query):
+    """构造 consult prompt"""
+    return CONSULT_PROMPT_TEMPLATE.format(text_query=text_query)
 
 def decrypt_wechat_data(session_key_b64, encrypted_data_b64, iv_b64):
     """
@@ -135,11 +386,17 @@ def check_auth():
 # ===== 健康检查 =====
 @app.route("/api/health", methods=["GET"])
 def health():
+    # 真实 AI 优先级:智谱 > mavis
+    real_backend = "zhipu-glm4v" if _zhipu_available() else ("mavis" if _matrix_available() else None)
     return jsonify({
         "ok": True,
         "ts": time.time(),
-        "version": "1.0.0",
-        "mode": "demo" if not _matrix_available() else "real_available",
+        "version": "1.1.0",
+        "mode": "real" if real_backend else "demo",
+        "real_backend": real_backend,
+        "zhipu_configured": _zhipu_available(),
+        "matrix_configured": _matrix_available(),
+        "wechat_configured": bool(WECHAT_APPID and WECHAT_SECRET),
     })
 
 
@@ -176,7 +433,9 @@ def identify():
         return jsonify({"ok": False, "error": "请至少上传 1 张图片"}), 400
 
     use_real = request.args.get("real") == "1"
-    if use_real and _matrix_available():
+    if use_real and _zhipu_available():
+        return _identify_real(image_files)
+    elif use_real and _matrix_available():
         return _identify_real(image_files)
     else:
         return _identify_demo(image_files)
@@ -198,32 +457,36 @@ def _identify_demo(image_files):
 
 
 def _identify_real(image_files):
-    """真实模式:调 crop-identifier skill"""
+    """真实模式:调智谱 GLM-4V 识别作物"""
     saved_paths, session_dir = _save_images_to_tmp(image_files, prefix="identify")
     try:
-        sys.path.insert(0, str(IDENTIFIER_BIN_DIR))
-        # 复用 _matrix_client 公共模块
-        from _matrix_client import call_matrix_with_retry, extract_diagnosis_json
-        from identify_crop import (
-            fill_placeholders, load_prompt_template, build_image_info,
-            normalize_crop_probabilities,
-        )
+        # 构造 identify prompt
+        parts = (request.form.get("parts") or "").strip() or None
+        location = (request.form.get("location") or "").strip() or None
+        season = (request.form.get("season") or "").strip() or None
 
-        template = load_prompt_template()
-        import argparse
-        args = argparse.Namespace(
-            image=saved_paths,
-            parts=(request.form.get("parts") or "").strip() or None,
-            location=(request.form.get("location") or "").strip() or None,
-            season=(request.form.get("season") or "").strip() or None,
-        )
-        prompt = fill_placeholders(template, args)
-        image_info = build_image_info(saved_paths, prompt)
+        extra = []
+        if parts:
+            extra.append(f"重点看部位:{parts}")
+        if location:
+            extra.append(f"种植地点:{location}")
+        if season:
+            extra.append(f"当前季节:{season}")
+        extra_text = ("\n附加信息:" + "; ".join(extra)) if extra else ""
 
-        env_path = str(IDENTIFIER_BIN_DIR)
-        matrix_resp = call_matrix_with_retry(image_info, env_path, backoff=[5, 15, 45])
-        result = extract_diagnosis_json(matrix_resp)
-        normalize_crop_probabilities(result)
+        prompt = IDENTIFY_PROMPT_TEMPLATE + extra_text
+
+        # 调智谱
+        print(f"[zhipu] identify: {len(saved_paths)} 张图", file=sys.stderr)
+        result = _call_zhipu_glm4v(saved_paths, prompt, max_tokens=1500, timeout=45)
+        # 兜底字段
+        result.setdefault("is_crop", True)
+        result.setdefault("primary_crop", {"name_zh": "未识别", "confidence": 0.0})
+        result.setdefault("candidates", [])
+        result.setdefault("reasoning", "")
+        result.setdefault("downstream_skills", [
+            {"name": "crop-disease-diagnosis", "auto_chainable": True}
+        ])
         result["_is_demo"] = False
         return jsonify(result)
     except Exception as e:
@@ -255,12 +518,16 @@ def diagnose():
 
     if image_files:
         # 图片模式
-        if use_real and _matrix_available():
+        if use_real and _zhipu_available():
+            return _diagnose_real(image_files, text_query)
+        elif use_real and _matrix_available():
             return _diagnose_real(image_files, text_query)
         return _diagnose_demo(image_files, text_query)
     else:
         # 纯文字模式
-        if use_real and _matrix_available():
+        if use_real and _zhipu_available():
+            return _consult_real(text_query)
+        elif use_real and _matrix_available():
             return _consult_real(text_query)
         return _consult_demo(text_query)
 
@@ -347,81 +614,106 @@ def _consult_demo(text_query):
 
 
 def _consult_real(text_query):
-    """文字问诊真实模式:调 LLM 当诊断专家(占位 TODO)"""
-    # TODO: 等接好 mavis 后,实现 LLM 文字对话:
-    #   1. system prompt 教它"你是作物病害诊断专家"
-    #   2. 用户输入当 user message
-    #   3. 调 matrix 的 text generation 工具(或任何 LLM)
-    #   4. 返回结构化 JSON(同 full-diagnosis 结构)
-    #
-    # 现在没接 LLM,降级到 demo:
-    print(f"[TODO] _consult_real called, text='{text_query[:50]}...', 降级到 demo", file=sys.stderr)
-    return _consult_demo(text_query)
+    """文字问诊真实模式:调智谱 GLM-4V 文字版"""
+    try:
+        prompt = _build_consult_prompt(text_query)
+        # 文字问诊无图,传空 list
+        print(f"[zhipu] consult: text='{text_query[:50]}'", file=sys.stderr)
+        result = _call_zhipu_glm4v([], prompt, max_tokens=2000, timeout=45)
+        # 兜底
+        result.setdefault("is_crop", True)
+        result.setdefault("primary_crop", {"name_zh": "未知", "confidence": 0.3})
+        result.setdefault("candidates", [])
+        result.setdefault("diagnosis", [{
+            "name": "文字描述待确认",
+            "probability": 0.5,
+            "severity": "未知",
+            "reasoning": "基于文字描述的初步判断",
+            "key_visual_clues": [],
+            "uncertainty_reason": "没有图片,建议上传 1-3 张照片获取精准诊断",
+            "need_expert": True,
+        }])
+        result.setdefault("treatment", {
+            "title": "文字问诊建议",
+            "actions": [
+                {"step": 1, "title": "补图", "description": "上传 1-3 张清晰照片(病斑特写/整株/不同角度)"},
+                {"step": 2, "title": "补文字", "description": "描述症状持续时间/扩散速度/受影响面积"},
+            ],
+            "prescription": {
+                "title": "未确诊前不建议盲目用药",
+                "chemicals": [],
+                "safety_warning": "未确诊前不建议盲目用药",
+                "followup": "上传图片后免费重跑诊断",
+            },
+        })
+        result["_is_demo"] = False
+        result["_is_text_only"] = True
+        result["_identified_crop"] = {
+            "primary_crop": result.get("primary_crop"),
+            "candidates": result.get("candidates", []),
+        }
+        result["_chain"] = {
+            "stage1_identified_by": "text_llm",
+            "stage2_diagnosed_by": "zhipu_glm4v",
+            "identified_crop_name": result.get("primary_crop", {}).get("name_zh"),
+            "auto_chainable": True,
+        }
+        return jsonify(result)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": "文字问诊异常: " + str(e)}), 500
 
 
 def _diagnose_real(image_files):
-    """真实模式:先 identify 再 diagnose(两阶段 chain)"""
+    """真实模式:调智谱 GLM-4V,单次输出 identify + diagnose + treatment"""
     saved_paths, session_dir = _save_images_to_tmp(image_files, prefix="diagnose")
     try:
+        text_query = (request.form.get("text") or "").strip()
         crop = (request.form.get("crop") or "").strip()
-        context = (request.form.get("context") or "").strip()
         parts = (request.form.get("parts") or "").strip()
 
-        # Stage 1: identify(如果前端没传 crop)
-        identified_crop = None
-        if not crop:
-            try:
-                sys.path.insert(0, str(IDENTIFIER_BIN_DIR))
-                from _matrix_client import call_matrix_with_retry, extract_diagnosis_json
-                from identify_crop import (
-                    fill_placeholders, load_prompt_template, build_image_info,
-                    normalize_crop_probabilities,
-                )
-                template = load_prompt_template()
-                import argparse as ap
-                args = ap.Namespace(
-                    image=saved_paths, parts=parts or None,
-                    location=None, season=None,
-                )
-                prompt = fill_placeholders(template, args)
-                image_info = build_image_info(saved_paths, prompt)
-                env_path = str(IDENTIFIER_BIN_DIR)
-                matrix_resp = call_matrix_with_retry(image_info, env_path, backoff=[5, 15, 45])
-                identified_crop = extract_diagnosis_json(matrix_resp)
-                normalize_crop_probabilities(identified_crop)
-                if identified_crop.get("is_crop") and identified_crop.get("primary_crop"):
-                    crop = identified_crop["primary_crop"].get("name_zh") or ""
-            except Exception as e:
-                print(f"[warn] identify stage failed: {e}", file=sys.stderr)
+        # 构造 diagnose prompt
+        prompt = _build_diagnose_prompt(text_query)
 
-        # Stage 2: diagnose
-        sys.path.insert(0, str(SKILL_BIN_DIR))
-        from full_diagnosis import (
-            normalize_diagnosis_probabilities,
-            lookup_prescription,
-            build_image_info,
-            fill_placeholders,
-            load_prompt_template,
-        )
-        from _matrix_client import call_matrix_with_retry, extract_diagnosis_json
+        # 调智谱 GLM-4V(单次调用,一次性输出识别+诊断+方案)
+        print(f"[zhipu] diagnose: {len(saved_paths)} 张图, text='{text_query[:50]}'", file=sys.stderr)
+        diagnosis = _call_zhipu_glm4v(saved_paths, prompt, max_tokens=2500, timeout=60)
 
-        template = load_prompt_template()
-        import argparse
-        args = argparse.Namespace(
-            image=saved_paths, crop=crop or None,
-            duration=None, weather=None, chemical=None, parts=parts or None,
-        )
-        prompt = fill_placeholders(template, args)
-        image_info = build_image_info(saved_paths, prompt)
+        # 兜底字段
+        diagnosis.setdefault("is_crop", True)
+        diagnosis.setdefault("primary_crop", {"name_zh": crop or "未识别", "confidence": 0.5})
+        diagnosis.setdefault("candidates", [])
+        diagnosis.setdefault("diagnosis", [])
+        diagnosis.setdefault("treatment", {"title": "", "actions": [], "prescription": {}})
 
-        env_path = str(SKILL_BIN_DIR)
-        matrix_resp = call_matrix_with_retry(image_info, env_path, backoff=[5, 15, 45])
-        diagnosis = extract_diagnosis_json(matrix_resp)
-        normalize_diagnosis_probabilities(diagnosis.get("diagnosis", []))
-
-        top_diag = (diagnosis.get("diagnosis") or [{}])[0]
+        # 提取 top_diagnosis_name
+        diag_list = diagnosis.get("diagnosis", [])
+        if not diag_list:
+            diag_list = [{"name": "未诊断", "probability": 0, "severity": "未知"}]
+            diagnosis["diagnosis"] = diag_list
+        top_diag = diag_list[0]
         top_name = top_diag.get("name", "")
-        pres_title, pres_content = lookup_prescription(top_name, env_path)
+
+        # 构造 prescription(从 treatment 提取)
+        treatment = diagnosis.get("treatment", {})
+        pres = treatment.get("prescription", {})
+        pres_title = pres.get("title", "")
+        # 拼成 markdown 表格
+        pres_lines = []
+        if pres_title:
+            pres_lines.append(f"### {pres_title}")
+        for chem in pres.get("chemicals", []):
+            pres_lines.append(
+                f"- **{chem.get('name', '?')}**: {chem.get('dose', '?')} · {chem.get('method', '?')}"
+                + (f" · 间隔 {chem.get('interval_days', '?')} 天" if chem.get('interval_days') else "")
+                + (f" · 最多 {chem.get('max_times', '?')} 次" if chem.get('max_times') else "")
+            )
+        if pres.get("safety_warning"):
+            pres_lines.append(f"\n⚠️ **{pres['safety_warning']}**")
+        if pres.get("followup"):
+            pres_lines.append(f"\n📅 **复喷节奏**:{pres['followup']}")
+        pres_content = "\n".join(pres_lines) if pres_lines else ""
 
         full = {
             "diagnosis": diagnosis,
@@ -429,21 +721,25 @@ def _diagnose_real(image_files):
             "prescription": {
                 "title": pres_title,
                 "content": pres_content,
-                "available": pres_title is not None,
+                "available": bool(pres_title),
             },
             "metadata": {
                 "image_count": len(saved_paths),
                 "images": [p.replace("\\", "/") for p in saved_paths],
-                "crop": crop or None,
+                "crop": crop or diagnosis.get("primary_crop", {}).get("name_zh"),
                 "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "backend": "zhipu-glm4v",
             },
             "_is_demo": False,
-            "_identified_crop": identified_crop,
+            "_identified_crop": {
+                "primary_crop": diagnosis.get("primary_crop"),
+                "candidates": diagnosis.get("candidates", []),
+            },
             "_chain": {
-                "stage1_identified": identified_crop is not None,
+                "stage1_identified": True,
                 "stage2_diagnosed": True,
-                "identified_crop_name": (identified_crop or {}).get("primary_crop", {}).get("name_zh") if identified_crop else None,
-                "auto_chainable": any(d.get("auto_chainable") for d in (identified_crop or {}).get("downstream_skills", [])),
+                "identified_crop_name": diagnosis.get("primary_crop", {}).get("name_zh"),
+                "auto_chainable": True,
             },
         }
         return jsonify(full)
