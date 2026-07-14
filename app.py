@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 server/app.py — 征途问诊小程序后端
@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import shutil
+import threading
 import sys
 import tempfile
 import time
@@ -501,6 +502,29 @@ def _save_images_to_tmp(image_files, prefix="img"):
     return saved_paths, session_dir
 
 
+def _schedule_cleanup(session_dir, delay_seconds=3600):
+    """延迟删除 session_dir(默认 1 小时后),给前端 wx:image 组件足够时间拉图
+
+    实现:用 threading.Timer 在后台延迟删。
+    为什么不用 finally 立即删:前端拿 URL 后需要时间下载图(image 组件 src 加载),
+    立即删会 404。
+    """
+    def _do_cleanup():
+        try:
+            shutil.rmtree(session_dir, ignore_errors=True)
+            print(f"[cleanup] removed {session_dir}", file=sys.stderr)
+        except Exception as e:
+            print(f"[cleanup] err: {e}", file=sys.stderr)
+
+    try:
+        timer = threading.Timer(delay_seconds, _do_cleanup)
+        timer.daemon = True
+        timer.start()
+        print(f"[cleanup] scheduled {session_dir} in {delay_seconds}s", file=sys.stderr)
+    except Exception as e:
+        print(f"[cleanup] schedule err: {e}", file=sys.stderr)
+
+
 # ===== /api/identify(作物识别) =====
 @app.route("/api/identify", methods=["POST"])
 def identify():
@@ -571,10 +595,8 @@ def _identify_real(image_files):
         traceback.print_exc()
         return jsonify({"ok": False, "error": "识别服务异常: " + str(e)}), 500
     finally:
-        try:
-            shutil.rmtree(session_dir, ignore_errors=True)
-        except Exception:
-            pass
+        # 延迟删除(1 小时后),给前端 wx:image 组件足够时间拉图
+        _schedule_cleanup(session_dir, delay_seconds=3600)
 
 
 # ===== /api/diagnose(病害诊断,图片 OR 文字) =====
@@ -850,10 +872,8 @@ def _diagnose_real(image_files):
             "type": type(e).__name__,
         }), 500
     finally:
-        try:
-            shutil.rmtree(session_dir, ignore_errors=True)
-        except Exception:
-            pass
+        # 延迟删除(1 小时后),给前端 wx:image 组件足够时间拉图
+        _schedule_cleanup(session_dir, delay_seconds=3600)
 
 
 # ===== 反馈 =====
