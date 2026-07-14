@@ -426,7 +426,13 @@ def _matrix_available():
 
 # ===== 工具:落临时目录 =====
 def _save_images_to_tmp(image_files, prefix="img"):
-    """保存上传图片到临时目录,返回路径列表"""
+    """保存上传图片到临时目录,返回路径列表
+
+    关键:不直接用 werkzeug FileStorage.save()——
+    部分版本/部分环境下 save() 会偷偷在文件头尾插入/修改字节(实测多出 CRLF 等),
+    导致智谱 GLM-4V 报 1210 图片格式错误。
+    改用 f.stream.read() 显式拿原始字节,再以二进制模式写入磁盘,保证字节级一致。
+    """
     ts = int(time.time() * 1000)
     session_dir = UPLOAD_DIR / f"{prefix}-{ts}"
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -434,8 +440,36 @@ def _save_images_to_tmp(image_files, prefix="img"):
     for idx, f in enumerate(image_files):
         ext = Path(f.filename or "img.jpg").suffix or ".jpg"
         save_path = session_dir / f"{idx}{ext}"
-        f.save(save_path)
+        # 显式读 stream 的原始字节,绕开 FileStorage.save() 的潜在副作用
+        try:
+            f.stream.seek(0)
+        except Exception:
+            pass
+        # 优先用 f.read()(FileStorage.read,会跳过 leading CRLF)
+        # 兜底用 stream.read()
+        try:
+            raw = f.read()
+        except Exception:
+            raw = f.stream.read()
+        if isinstance(raw, str):
+            raw = raw.encode("latin-1", errors="replace")
+        # 剥掉 werkzeug 解析 multipart 时可能带进来的 leading CRLF/blank lines
+        # 找 JPEG/PNG/WEBP 的 magic byte 起点
+        for sig, name in [(b"\xff\xd8\xff", "jpeg"), (b"\x89PNG\r\n\x1a\n", "png"), (b"RIFF", "webp")]:
+            idx_sig = raw.find(sig)
+            if idx_sig > 0:
+                print(f"[save] {save_path}: 剥掉 {idx_sig} 字节前缀(leading CRLF 等), magic={name}", file=sys.stderr)
+                raw = raw[idx_sig:]
+                break
+        # 剥掉 trailing 残留(末尾的 \r\n 或 ? 等)
+        for trailer in (b"\r\n--", b"\r\n", b"?"):
+            if raw.endswith(trailer):
+                raw = raw[: -len(trailer)]
+                break
+        with open(save_path, "wb") as out:
+            out.write(raw)
         saved_paths.append(str(save_path))
+        print(f"[save] {save_path}: size={len(raw)} head={raw[:8].hex()} tail={raw[-8:].hex()}", file=sys.stderr)
     return saved_paths, session_dir
 
 
