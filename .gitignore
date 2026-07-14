@@ -5,7 +5,6 @@ check_*.py
 parse_*.py
 build_*.py
 skill_prescription_parsed.json
-disease_kb_from_skill.json
 *.pyc
 *.pyo
 *.pyd
