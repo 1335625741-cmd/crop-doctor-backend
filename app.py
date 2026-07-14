@@ -401,7 +401,8 @@ def serve_upload(filepath):
 @app.before_request
 def check_auth():
     PUBLIC_PATHS = {"/api/health"}
-    if request.path in PUBLIC_PATHS:
+    # 静态文件(uploads/)是用户自己上传的图片,wx:image src 不带 token,需要公开
+    if request.path in PUBLIC_PATHS or request.path.startswith("/uploads/"):
         return None
     if not AUTH_TOKEN:
         return jsonify({"ok": False, "error": "服务端未配置 CROP_DOCTOR_TOKEN"}), 503
