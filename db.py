@@ -245,33 +245,135 @@ def insert_feedback(openid=None, diagnosis_id=None, key=None, text=None,
         return fb_id
 
 
-def list_feedbacks(limit=50, offset=0, openid=None):
+def list_feedbacks(limit=50, offset=0, openid=None, key=None, time_range=None):
+    """反馈列表(支持过滤)
+
+    Args:
+        openid: 按用户过滤
+        key: 按反馈选项过滤(A/B/C/D/E)
+        time_range: 时间范围 '24h' / '7d' / '30d' / None(=全部)
+    """
     with get_conn() as conn:
+        wheres = []
+        params = []
         if openid:
-            rows = conn.execute('SELECT * FROM feedbacks WHERE openid=? ORDER BY ts DESC LIMIT ? OFFSET ?',
-                                (openid, limit, offset)).fetchall()
-        else:
-            rows = conn.execute('SELECT * FROM feedbacks ORDER BY ts DESC LIMIT ? OFFSET ?',
-                                (limit, offset)).fetchall()
+            wheres.append('openid=?'); params.append(openid)
+        if key:
+            wheres.append('key=?'); params.append(key)
+        if time_range:
+            cutoff = _time_range_to_cutoff(time_range)
+            if cutoff:
+                wheres.append('ts >= ?'); params.append(cutoff)
+        where_sql = (' WHERE ' + ' AND '.join(wheres)) if wheres else ''
+        sql = f'SELECT * FROM feedbacks{where_sql} ORDER BY ts DESC LIMIT ? OFFSET ?'
+        params.extend([limit, offset])
+        rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
 
-def count_feedbacks(openid=None, key=None):
+def count_feedbacks(openid=None, key=None, time_range=None):
     with get_conn() as conn:
-        sql = 'SELECT COUNT(*) FROM feedbacks'
+        wheres = []
         params = []
         if openid:
-            sql += ' WHERE openid=?'; params.append(openid)
+            wheres.append('openid=?'); params.append(openid)
         if key:
-            sql += (' AND' if openid else ' WHERE') + ' key=?'; params.append(key)
+            wheres.append('key=?'); params.append(key)
+        if time_range:
+            cutoff = _time_range_to_cutoff(time_range)
+            if cutoff:
+                wheres.append('ts >= ?'); params.append(cutoff)
+        where_sql = (' WHERE ' + ' AND '.join(wheres)) if wheres else ''
+        sql = f'SELECT COUNT(*) FROM feedbacks{where_sql}'
         return conn.execute(sql, params).fetchone()[0]
+
+
+def _time_range_to_cutoff(time_range):
+    """time_range 字符串 → 时间戳(秒)
+
+    '24h' = 最近 24 小时
+    '7d'  = 最近 7 天
+    '30d' = 最近 30 天
+    """
+    if not time_range:
+        return None
+    now = time.time()
+    if time_range == '24h':
+        return now - 86400
+    if time_range == '7d':
+        return now - 86400 * 7
+    if time_range == '30d':
+        return now - 86400 * 30
+    return None
+
+
+def list_diagnoses(limit=50, offset=0, openid=None, time_range=None):
+    """诊断历史(支持过滤)"""
+    with get_conn() as conn:
+        wheres = []
+        params = []
+        if openid:
+            wheres.append('openid=?'); params.append(openid)
+        if time_range:
+            cutoff = _time_range_to_cutoff(time_range)
+            if cutoff:
+                wheres.append('ts >= ?'); params.append(cutoff)
+        where_sql = (' WHERE ' + ' AND '.join(wheres)) if wheres else ''
+        sql = f'SELECT * FROM diagnoses{where_sql} ORDER BY ts DESC LIMIT ? OFFSET ?'
+        params.extend([limit, offset])
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+
+def count_diagnoses(openid=None, time_range=None):
+    with get_conn() as conn:
+        wheres = []
+        params = []
+        if openid:
+            wheres.append('openid=?'); params.append(openid)
+        if time_range:
+            cutoff = _time_range_to_cutoff(time_range)
+            if cutoff:
+                wheres.append('ts >= ?'); params.append(cutoff)
+        where_sql = (' WHERE ' + ' AND '.join(wheres)) if wheres else ''
+        sql = f'SELECT COUNT(*) FROM diagnoses{where_sql}'
+        return conn.execute(sql, params).fetchone()[0]
+
+
+def list_users(limit=50, offset=0, time_range=None):
+    with get_conn() as conn:
+        wheres = []
+        params = []
+        if time_range:
+            cutoff = _time_range_to_cutoff(time_range)
+            if cutoff:
+                wheres.append('last_active_at >= ?'); params.append(cutoff)
+        where_sql = (' WHERE ' + ' AND '.join(wheres)) if wheres else ''
+        sql = f'SELECT * FROM users{where_sql} ORDER BY last_active_at DESC LIMIT ? OFFSET ?'
+        params.extend([limit, offset])
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+
+def count_users(time_range=None):
+    with get_conn() as conn:
+        if time_range:
+            cutoff = _time_range_to_cutoff(time_range)
+            if cutoff:
+                return conn.execute('SELECT COUNT(*) FROM users WHERE last_active_at >= ?', (cutoff,)).fetchone()[0]
+        return conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
 
 
 # ============================================================
 # 统计(给 admin dashboard 用)
 # ============================================================
-def get_stats():
-    """总览统计"""
+def get_stats(time_range=None):
+    """总览统计(支持 time_range 过滤)
+
+    Args:
+        time_range: '24h' / '7d' / '30d' / None(=全部)
+    """
+    cutoff = _time_range_to_cutoff(time_range) if time_range else None
     with get_conn() as conn:
         c = conn.cursor()
         stats = {}
@@ -294,30 +396,67 @@ def get_stats():
         stats['text_diagnoses'] = c.execute('SELECT COUNT(*) FROM diagnoses WHERE is_text_only=1').fetchone()[0]
         stats['kb_hits'] = c.execute('SELECT COUNT(*) FROM diagnoses WHERE is_kb_hit=1').fetchone()[0]
 
-        # 反馈
-        stats['total_feedbacks'] = c.execute('SELECT COUNT(*) FROM feedbacks').fetchone()[0]
-        # 反馈分布(A/B/C/D/E)
-        fb_dist = c.execute('''
-            SELECT key, COUNT(*) as cnt FROM feedbacks
-            WHERE key IS NOT NULL AND key != ''
-            GROUP BY key ORDER BY key
-        ''').fetchall()
-        stats['feedback_distribution'] = {r['key']: r['cnt'] for r in fb_dist}
+        # 反馈(支持 time_range)
+        if cutoff:
+            stats['total_feedbacks'] = c.execute(
+                'SELECT COUNT(*) FROM feedbacks WHERE ts >= ?', (cutoff,)).fetchone()[0]
+            fb_dist_rows = c.execute('''
+                SELECT key, COUNT(*) as cnt FROM feedbacks
+                WHERE key IS NOT NULL AND key != '' AND ts >= ?
+                GROUP BY key ORDER BY key
+            ''', (cutoff,)).fetchall()
+        else:
+            stats['total_feedbacks'] = c.execute('SELECT COUNT(*) FROM feedbacks').fetchone()[0]
+            fb_dist_rows = c.execute('''
+                SELECT key, COUNT(*) as cnt FROM feedbacks
+                WHERE key IS NOT NULL AND key != ''
+                GROUP BY key ORDER BY key
+            ''').fetchall()
+        stats['feedback_distribution'] = {r['key']: r['cnt'] for r in fb_dist_rows}
 
-        # Top 5 常见病
-        top_diseases = c.execute('''
-            SELECT disease_name, COUNT(*) as cnt FROM diagnoses
-            WHERE disease_name IS NOT NULL AND disease_name != ''
-            GROUP BY disease_name ORDER BY cnt DESC LIMIT 5
-        ''').fetchall()
+        # 负面反馈计数(D 恶化 + E 还没处理)— 高亮用
+        stats['negative_feedbacks'] = stats['feedback_distribution'].get('D', 0) + stats['feedback_distribution'].get('E', 0)
+
+        # Top 5 常见病(time_range 过滤)
+        if cutoff:
+            top_diseases = c.execute('''
+                SELECT disease_name, COUNT(*) as cnt FROM diagnoses
+                WHERE disease_name IS NOT NULL AND disease_name != '' AND ts >= ?
+                GROUP BY disease_name ORDER BY cnt DESC LIMIT 5
+            ''', (cutoff,)).fetchall()
+        else:
+            top_diseases = c.execute('''
+                SELECT disease_name, COUNT(*) as cnt FROM diagnoses
+                WHERE disease_name IS NOT NULL AND disease_name != ''
+                GROUP BY disease_name ORDER BY cnt DESC LIMIT 5
+            ''').fetchall()
         stats['top_diseases'] = [{'name': r['disease_name'], 'count': r['cnt']} for r in top_diseases]
 
         # Top 5 常见作物
-        top_crops = c.execute('''
-            SELECT crop, COUNT(*) as cnt FROM diagnoses
-            WHERE crop IS NOT NULL AND crop != ''
-            GROUP BY crop ORDER BY cnt DESC LIMIT 5
-        ''').fetchall()
+        if cutoff:
+            top_crops = c.execute('''
+                SELECT crop, COUNT(*) as cnt FROM diagnoses
+                WHERE crop IS NOT NULL AND crop != '' AND ts >= ?
+                GROUP BY crop ORDER BY cnt DESC LIMIT 5
+            ''', (cutoff,)).fetchall()
+        else:
+            top_crops = c.execute('''
+                SELECT crop, COUNT(*) as cnt FROM diagnoses
+                WHERE crop IS NOT NULL AND crop != ''
+                GROUP BY crop ORDER BY cnt DESC LIMIT 5
+            ''').fetchall()
         stats['top_crops'] = [{'name': r['crop'], 'count': r['cnt']} for r in top_crops]
 
         return stats
+
+
+def get_recent_negative_feedbacks(limit=20, time_range='24h'):
+    """最近负面反馈(D 恶化 + E 还没处理)"""
+    cutoff = _time_range_to_cutoff(time_range) or _time_range_to_cutoff('24h')
+    with get_conn() as conn:
+        rows = conn.execute('''
+            SELECT * FROM feedbacks
+            WHERE key IN ('D', 'E') AND ts >= ?
+            ORDER BY ts DESC LIMIT ?
+        ''', (cutoff, limit)).fetchall()
+        return [dict(r) for r in rows]

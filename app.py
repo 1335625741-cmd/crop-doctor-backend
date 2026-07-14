@@ -498,7 +498,7 @@ def health():
     return jsonify({
         "ok": True,
         "ts": time.time(),
-        "version": "1.2.0",
+        "version": "1.3.0",
         "mode": "real" if real_backend else "demo",
         "real_backend": real_backend,
         "zhipu_configured": _zhipu_available(),
@@ -1221,48 +1221,68 @@ def _check_admin():
 
 @app.route("/api/admin/stats", methods=["GET"])
 def admin_stats():
-    """总览统计"""
+    """总览统计(支持 time_range 过滤)"""
     err = _check_admin()
     if err: return err
-    return jsonify({"ok": True, "stats": _db.get_stats()})
+    time_range = request.args.get("time_range")  # '24h' / '7d' / '30d' / None
+    return jsonify({
+        "ok": True,
+        "stats": _db.get_stats(time_range=time_range),
+        "time_range": time_range or "all",
+    })
 
 
 @app.route("/api/admin/users", methods=["GET"])
 def admin_users():
-    """用户列表"""
+    """用户列表(支持 time_range)"""
     err = _check_admin()
     if err: return err
     limit = int(request.args.get("limit", 50))
     offset = int(request.args.get("offset", 0))
-    users = _db.list_users(limit=limit, offset=offset)
-    total = _db.count_users()
+    time_range = request.args.get("time_range")
+    users = _db.list_users(limit=limit, offset=offset, time_range=time_range)
+    total = _db.count_users(time_range=time_range)
     return jsonify({"ok": True, "users": users, "total": total})
 
 
 @app.route("/api/admin/diagnoses", methods=["GET"])
 def admin_diagnoses():
-    """诊断历史"""
+    """诊断历史(支持 time_range)"""
     err = _check_admin()
     if err: return err
     limit = int(request.args.get("limit", 50))
     offset = int(request.args.get("offset", 0))
     openid = request.args.get("openid")
-    diags = _db.list_diagnoses(limit=limit, offset=offset, openid=openid)
-    total = _db.count_diagnoses(openid=openid)
+    time_range = request.args.get("time_range")
+    diags = _db.list_diagnoses(limit=limit, offset=offset, openid=openid, time_range=time_range)
+    total = _db.count_diagnoses(openid=openid, time_range=time_range)
     return jsonify({"ok": True, "diagnoses": diags, "total": total})
 
 
 @app.route("/api/admin/feedbacks", methods=["GET"])
 def admin_feedbacks():
-    """反馈列表"""
+    """反馈列表(支持 time_range + key 过滤)"""
     err = _check_admin()
     if err: return err
     limit = int(request.args.get("limit", 50))
     offset = int(request.args.get("offset", 0))
     openid = request.args.get("openid")
-    fbs = _db.list_feedbacks(limit=limit, offset=offset, openid=openid)
-    total = _db.count_feedbacks(openid=openid)
+    key = request.args.get("key")  # A/B/C/D/E
+    time_range = request.args.get("time_range")
+    fbs = _db.list_feedbacks(limit=limit, offset=offset, openid=openid, key=key, time_range=time_range)
+    total = _db.count_feedbacks(openid=openid, key=key, time_range=time_range)
     return jsonify({"ok": True, "feedbacks": fbs, "total": total})
+
+
+@app.route("/api/admin/negative-feedbacks", methods=["GET"])
+def admin_negative_feedbacks():
+    """最近负面反馈(D恶化+E还没)— 高亮用"""
+    err = _check_admin()
+    if err: return err
+    limit = int(request.args.get("limit", 20))
+    time_range = request.args.get("time_range", "24h")
+    fbs = _db.get_recent_negative_feedbacks(limit=limit, time_range=time_range)
+    return jsonify({"ok": True, "feedbacks": fbs, "time_range": time_range})
 
 
 # ============================================================
@@ -1327,6 +1347,25 @@ tr:hover { background: #f9fafb; }
 .refresh-btn:hover { background: #059669; }
 .ts { color: #9ca3af; font-size: 12px; }
 .truncate { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolbar { background: #fff; padding: 16px 20px; border-radius: 10px; margin-bottom: 16px;
+          box-shadow: 0 1px 4px rgba(0,0,0,0.05); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.toolbar label { font-size: 13px; color: #4a5568; }
+.toolbar select { padding: 6px 10px; border-radius: 6px; border: 1px solid #d1d5db;
+                 background: #fff; font-size: 13px; cursor: pointer; }
+.toolbar .live-dot { width: 8px; height: 8px; border-radius: 50%; background: #10b981;
+                     display: inline-block; animation: pulse 2s infinite; margin-right: 6px; }
+.toolbar .live-dot.paused { background: #9ca3af; animation: none; }
+.toolbar .live-toggle { padding: 4px 10px; border: 1px solid #d1d5db; background: #fff;
+                       border-radius: 6px; cursor: pointer; font-size: 12px; }
+.toolbar .live-toggle.active { background: #10b981; color: #fff; border-color: #10b981; }
+.negative-banner { background: linear-gradient(135deg, #fee2e2, #fecaca); border: 2px solid #ef4444;
+                    border-radius: 10px; padding: 16px 20px; margin-bottom: 16px; }
+.negative-banner-title { color: #991b1b; font-weight: 700; font-size: 16px; margin-bottom: 8px; }
+.negative-banner-item { background: #fff; border-radius: 6px; padding: 8px 12px; margin-top: 6px;
+                        font-size: 13px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.negative-banner-item .badge-D { background: #ef4444; color: #fff; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+.negative-banner-item .badge-E { background: #b91c1c; color: #fff; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 </style>
 </head>
 <body>
@@ -1342,6 +1381,37 @@ tr:hover { background: #f9fafb; }
     <h1>🌾 征途问诊管理后台</h1>
     <p class="subtitle">用户 · 诊断 · 反馈 统计与分析</p>
     <button class="refresh-btn" onclick="loadAll()">🔄 刷新全部</button>
+
+    <!-- ★ 负面反馈高亮区(D 恶化 + E 还没处理) -->
+    <div id="negativeBanner" class="negative-banner" style="display:none;">
+      <div class="negative-banner-title">⚠️ 近期负面反馈</div>
+      <div id="negativeBannerList"></div>
+    </div>
+
+    <!-- ★ 工具栏:时间范围 + 反馈选项过滤 + 30 秒轮询开关 -->
+    <div class="toolbar">
+      <label>时间范围:</label>
+      <select id="timeRange" onchange="loadAll()">
+        <option value="">全部</option>
+        <option value="24h" selected>最近 24 小时</option>
+        <option value="7d">最近 7 天</option>
+        <option value="30d">最近 30 天</option>
+      </select>
+      <label style="margin-left:8px;">反馈选项:</label>
+      <select id="fbKey" onchange="loadAll()">
+        <option value="">全部</option>
+        <option value="A">A 解决了</option>
+        <option value="B">B 改善一些</option>
+        <option value="C">C 没变化</option>
+        <option value="D">D 恶化了</option>
+        <option value="E">E 还没处理</option>
+      </select>
+      <div style="flex:1;"></div>
+      <span class="live-dot" id="liveDot"></span>
+      <span style="font-size:12px;color:#6b7280;" id="liveStatus">30秒自动刷新</span>
+      <button class="live-toggle active" id="liveToggle" onclick="toggleLive()">⏸ 暂停</button>
+    </div>
+
     <div class="tabs">
       <div class="tab active" data-tab="overview" onclick="switchTab('overview')">📊 总览</div>
       <div class="tab" data-tab="users" onclick="switchTab('users')">👤 用户</div>
@@ -1355,8 +1425,16 @@ tr:hover { background: #f9fafb; }
   </div>
 </div>
 <script>
+// ★ 支持 ?admin_token=xxx URL 参数(方便分享,首次访问时直接登录)
+const _urlToken = new URLSearchParams(location.search).get('admin_token') || '';
+if (_urlToken) localStorage.setItem('admin_token', _urlToken);
 let ADMIN_TOKEN = localStorage.getItem('admin_token') || '';
 function $(id) { return document.getElementById(id); }
+// ★ 登录页 input 自动填(localStorage 有就预填)
+document.addEventListener('DOMContentLoaded', () => {
+  const inp = $('adminToken');
+  if (inp && ADMIN_TOKEN) inp.value = ADMIN_TOKEN;
+});
 function doLogin() {
   ADMIN_TOKEN = $('adminToken').value.trim();
   if (!ADMIN_TOKEN) { $('loginError').textContent = '请输入 token'; return; }
@@ -1364,6 +1442,7 @@ function doLogin() {
   loadAll().then(() => {
     if ($('mainView').style.display !== 'none') {
       $('loginView').style.display = 'none';
+      startLive();  // ★ 登录成功 → 启动 30 秒轮询
     }
   }).catch(e => {
     $('loginError').textContent = 'Token 错误或后端不可用: ' + e.message;
@@ -1384,9 +1463,9 @@ function fmtTs(ts) {
   if (!ts) return '-';
   return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false });
 }
-function renderOverview(s) {
+function renderOverview(s, tr) {
   const feedbackHtml = Object.entries(s.feedback_distribution || {}).map(
-    ([k, v]) => `<tr><td><span class="badge badge-info">${k}</span></td><td>${v}</td></tr>`
+    ([k, v]) => `<tr><td><span class="badge fb-${k}">${k}</span></td><td>${v}</td></tr>`
   ).join('') || '<tr><td colspan="2" class="empty">暂无反馈</td></tr>';
   const topDis = (s.top_diseases || []).map(d =>
     `<tr><td>${d.name}</td><td>${d.count}</td></tr>`
@@ -1394,12 +1473,26 @@ function renderOverview(s) {
   const topCr = (s.top_crops || []).map(d =>
     `<tr><td>${d.name}</td><td>${d.count}</td></tr>`
   ).join('') || '<tr><td colspan="2" class="empty">暂无数据</td></tr>';
+  const trLabel = tr === '24h' ? '最近 24 小时' : tr === '7d' ? '最近 7 天' : tr === '30d' ? '最近 30 天' : '全部时间';
+  const neg = s.negative_feedbacks || 0;
+  const negCard = neg > 0
+    ? `<div class="stat-card" style="background:linear-gradient(135deg,#fef2f2,#fee2e2);border:2px solid #ef4444;">
+         <div class="stat-label" style="color:#991b1b;">⚠️ 负面反馈</div>
+         <div class="stat-value" style="color:#b91c1c;">${neg}</div>
+         <div class="stat-sub" style="color:#7f1d1d;">D 恶化 + E 未处理 · ${trLabel}</div>
+       </div>`
+    : `<div class="stat-card">
+         <div class="stat-label">⚠️ 负面反馈</div>
+         <div class="stat-value" style="color:#10b981;">0</div>
+         <div class="stat-sub">D 恶化 + E 未处理 · ${trLabel}</div>
+       </div>`;
   return `
     <div class="stats-grid">
-      <div class="stat-card"><div class="stat-label">总用户</div><div class="stat-value">${s.total_users}</div><div class="stat-sub">今日活跃 ${s.today_active} · 体验 ${s.guest_users}</div></div>
+      <div class="stat-card"><div class="stat-label">总用户</div><div class="stat-value">${s.total_users}</div><div class="stat-sub">${trLabel}</div></div>
       <div class="stat-card"><div class="stat-label">总诊断</div><div class="stat-value">${s.total_diagnoses}</div><div class="stat-sub">今日 ${s.today_diagnoses} · 图 ${s.image_diagnoses} · 文 ${s.text_diagnoses}</div></div>
       <div class="stat-card"><div class="stat-label">KB 命中</div><div class="stat-value">${s.kb_hits}</div><div class="stat-sub">知识库直出,免智谱调用</div></div>
-      <div class="stat-card"><div class="stat-label">总反馈</div><div class="stat-value">${s.total_feedbacks}</div><div class="stat-sub">A-E 分布见右</div></div>
+      <div class="stat-card"><div class="stat-label">总反馈</div><div class="stat-value">${s.total_feedbacks}</div><div class="stat-sub">${trLabel}</div></div>
+      ${negCard}
     </div>
     <div class="row">
       <div class="section">
@@ -1463,20 +1556,66 @@ function renderFeedbacks(data) {
 }
 async function loadAll() {
   if (!ADMIN_TOKEN) { $('mainView').style.display = 'none'; $('loginView').style.display = 'block'; return; }
-  const [stats, users, diags, fbs] = await Promise.all([
-    api('/api/admin/stats'),
-    api('/api/admin/users'),
-    api('/api/admin/diagnoses'),
-    api('/api/admin/feedbacks'),
+  // ★ 拿当前过滤参数
+  const tr = $('timeRange').value;
+  const fk = $('fbKey').value;
+  const trQ = tr ? '&time_range=' + encodeURIComponent(tr) : '';
+  const fkQ = fk ? '&key=' + encodeURIComponent(fk) : '';
+  const [stats, users, diags, fbs, negatives] = await Promise.all([
+    api('/api/admin/stats' + trQ),
+    api('/api/admin/users' + trQ),
+    api('/api/admin/diagnoses' + trQ),
+    api('/api/admin/feedbacks' + trQ + fkQ),
+    api('/api/admin/negative-feedbacks?time_range=' + (tr || '24h')),
   ]);
   $('loginView').style.display = 'none';
   $('mainView').style.display = 'block';
-  $('tab-overview').innerHTML = renderOverview(stats.stats);
+  $('tab-overview').innerHTML = renderOverview(stats.stats, stats.time_range);
   $('tab-users').innerHTML = renderUsers(users);
   $('tab-diagnoses').innerHTML = renderDiagnoses(diags);
   $('tab-feedbacks').innerHTML = renderFeedbacks(fbs);
+
+  // ★ 渲染负面反馈高亮区
+  if (negatives.feedbacks && negatives.feedbacks.length > 0) {
+    $('negativeBanner').style.display = 'block';
+    $('negativeBannerList').innerHTML = negatives.feedbacks.map(f => `
+      <div class="negative-banner-item">
+        <span class="badge-${f.key}">${f.key === 'D' ? '恶化' : '未处理'}</span>
+        <span><b>${f.disease_name || '未知病'}</b> · ${f.crop || '-'} · ${f.severity || '-'}</span>
+        <span class="ts">${fmtTs(f.ts)}</span>
+        <span style="color:#6b7280;">${f.openid ? f.openid.substring(0, 12) + '...' : '-'}</span>
+        <span style="color:#374151;flex:1;">${f.text ? '💬 ' + f.text : ''}</span>
+      </div>
+    `).join('');
+  } else {
+    $('negativeBanner').style.display = 'none';
+  }
 }
-if (ADMIN_TOKEN) loadAll();
+
+// ★ 自动轮询(30 秒)
+let liveTimer = null;
+let livePaused = false;
+function startLive() {
+  if (liveTimer) return;
+  livePaused = false;
+  $('liveToggle').textContent = '⏸ 暂停';
+  $('liveToggle').classList.add('active');
+  $('liveDot').classList.remove('paused');
+  $('liveStatus').textContent = '30秒自动刷新';
+  liveTimer = setInterval(loadAll, 30000);
+}
+function stopLive() {
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  livePaused = true;
+  $('liveToggle').textContent = '▶ 恢复';
+  $('liveToggle').classList.remove('active');
+  $('liveDot').classList.add('paused');
+  $('liveStatus').textContent = '已暂停';
+}
+function toggleLive() { livePaused ? startLive() : stopLive(); }
+
+// 启动轮询(用户登录成功后由 doLogin 触发)
+if (ADMIN_TOKEN) { loadAll().then(startLive); }
 </script>
 </body>
 </html>'''
