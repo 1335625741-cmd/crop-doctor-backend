@@ -498,7 +498,7 @@ def health():
     return jsonify({
         "ok": True,
         "ts": time.time(),
-        "version": "1.3.0",
+        "version": "1.3.1",
         "mode": "real" if real_backend else "demo",
         "real_backend": real_backend,
         "zhipu_configured": _zhipu_available(),
@@ -1365,6 +1365,24 @@ tr:hover { background: #f9fafb; }
                         font-size: 13px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .negative-banner-item .badge-D { background: #ef4444; color: #fff; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
 .negative-banner-item .badge-E { background: #b91c1c; color: #fff; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+.fb-cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 16px; }
+.fb-card { background: #fff; border: 2px solid #e5e7eb; border-radius: 10px; padding: 16px 12px;
+           text-align: center; cursor: pointer; transition: all 0.15s; user-select: none; }
+.fb-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+.fb-card.selected { border-color: #10b981; background: linear-gradient(135deg, #ecfdf5, #d1fae5); box-shadow: 0 2px 8px rgba(16,185,129,0.2); }
+.fb-card .fb-card-key { font-size: 24px; font-weight: 700; padding: 4px 0; border-radius: 6px; margin-bottom: 6px; }
+.fb-card .fb-card-label { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+.fb-card .fb-card-count { font-size: 20px; font-weight: 700; color: #1f2937; }
+.fb-card[data-key="A"] .fb-card-key { background: #d1fae5; color: #065f46; }
+.fb-card[data-key="B"] .fb-card-key { background: #ecfccb; color: #3f6212; }
+.fb-card[data-key="C"] .fb-card-key { background: #fef9c3; color: #854d0e; }
+.fb-card[data-key="D"] .fb-card-key { background: #fed7aa; color: #9a3412; }
+.fb-card[data-key="E"] .fb-card-key { background: #fecaca; color: #991b1b; }
+.fb-list-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.fb-list-header .refresh-btn { background: #3b82f6; }
+.fb-list-header .refresh-btn:hover { background: #2563eb; }
+.fb-list-status { font-size: 13px; color: #4a5568; }
+.fb-list-status b { color: #1f2937; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 </style>
 </head>
@@ -1388,23 +1406,14 @@ tr:hover { background: #f9fafb; }
       <div id="negativeBannerList"></div>
     </div>
 
-    <!-- ★ 工具栏:时间范围 + 反馈选项过滤 + 30 秒轮询开关 -->
+    <!-- ★ 工具栏:时间范围 + 30 秒轮询开关(反馈选项已挪到反馈 tab 顶部卡片) -->
     <div class="toolbar">
       <label>时间范围:</label>
-      <select id="timeRange" onchange="loadAll()">
+      <select id="timeRange" onchange="onTimeRangeChange()">
         <option value="">全部</option>
         <option value="24h" selected>最近 24 小时</option>
         <option value="7d">最近 7 天</option>
         <option value="30d">最近 30 天</option>
-      </select>
-      <label style="margin-left:8px;">反馈选项:</label>
-      <select id="fbKey" onchange="loadAll()">
-        <option value="">全部</option>
-        <option value="A">A 解决了</option>
-        <option value="B">B 改善一些</option>
-        <option value="C">C 没变化</option>
-        <option value="D">D 恶化了</option>
-        <option value="E">E 还没处理</option>
       </select>
       <div style="flex:1;"></div>
       <span class="live-dot" id="liveDot"></span>
@@ -1429,6 +1438,10 @@ tr:hover { background: #f9fafb; }
 const _urlToken = new URLSearchParams(location.search).get('admin_token') || '';
 if (_urlToken) localStorage.setItem('admin_token', _urlToken);
 let ADMIN_TOKEN = localStorage.getItem('admin_token') || '';
+// ★ 反馈 tab 状态:当前选中的 A-E(默认 null = 全部)
+let _fbSelectedKey = null;
+let _fbListCache = null;       // 缓存上次列表结果
+let _fbListLoading = false;    // 防抖
 function $(id) { return document.getElementById(id); }
 // ★ 登录页 input 自动填(localStorage 有就预填)
 document.addEventListener('DOMContentLoaded', () => {
@@ -1540,10 +1553,41 @@ function renderDiagnoses(data) {
     </tr>`).join('')}
     </tbody></table></div>`;
 }
-function renderFeedbacks(data) {
-  if (!data.feedbacks || !data.feedbacks.length) return '<div class="empty">暂无反馈</div>';
-  return `<div class="section"><h2>💬 反馈列表 (共 ${data.total})</h2>
-    <table><thead><tr><th>时间</th><th>openid</th><th>选项</th><th>病名</th><th>严重度</th><th>文本</th></tr></thead><tbody>
+function renderFeedbacks(dist, data) {
+  // dist = { A: 2, B: 0, ... } (来自 stats,按 time_range 过滤后的分布)
+  // data = { feedbacks: [...], total: N } (当前选中选项的列表,可能为 null 表示还没刷新)
+  const labels = { A: '解决了', B: '改善一些', C: '没变化', D: '恶化了', E: '还没处理' };
+  const cards = ['A', 'B', 'C', 'D', 'E'].map(k => {
+    const cnt = (dist && dist[k]) || 0;
+    const sel = _fbSelectedKey === k;
+    return `<div class="fb-card ${sel ? 'selected' : ''}" data-key="${k}" onclick="selectFbKey('${k}')" title="点击${sel ? '取消' : '筛选'}${labels[k]}的反馈">
+      <div class="fb-card-key">${k}</div>
+      <div class="fb-card-label">${labels[k]}</div>
+      <div class="fb-card-count">${cnt}</div>
+    </div>`;
+  }).join('');
+  // ★ 列表头部:手动刷新按钮 + 当前状态
+  const listHeader = `
+    <div class="fb-list-header">
+      <button class="refresh-btn" onclick="refreshFbList()" id="fbRefreshBtn">🔄 手动刷新</button>
+      <span class="fb-list-status">
+        当前选项: <b>${_fbSelectedKey ? _fbSelectedKey + ' ' + labels[_fbSelectedKey] : '全部'}</b>
+        ${data && data.total != null ? `· 共 <b>${data.total}</b> 条` : '· <span style="color:#9ca3af;">未刷新</span>'}
+        ${_fbListLoading ? '· <span style="color:#3b82f6;">⏳ 加载中...</span>' : ''}
+      </span>
+      <span class="ts" style="margin-left:auto;" id="fbLastRefresh"></span>
+    </div>
+  `;
+  // ★ 列表内容
+  let listHtml;
+  if (!data) {
+    listHtml = '<div class="empty">点击「🔄 手动刷新」加载反馈列表</div>';
+  } else if (!data.feedbacks || !data.feedbacks.length) {
+    listHtml = `<div class="empty">${_fbSelectedKey ? '该选项暂无反馈' : '暂无反馈'}</div>`;
+  } else {
+    listHtml = `<div class="section"><table><thead><tr>
+      <th>时间</th><th>openid</th><th>选项</th><th>病名</th><th>严重度</th><th>文本</th>
+    </tr></thead><tbody>
     ${data.feedbacks.map(f => `<tr>
       <td class="ts">${fmtTs(f.ts)}</td>
       <td class="truncate" title="${f.openid || ''}">${f.openid || '-'}</td>
@@ -1553,19 +1597,24 @@ function renderFeedbacks(data) {
       <td>${f.text || '-'}</td>
     </tr>`).join('')}
     </tbody></table></div>`;
+  }
+  return `
+    <h2 style="margin:8px 0 12px;">💬 反馈管理</h2>
+    <div class="fb-cards">${cards}</div>
+    ${listHeader}
+    <div id="fbListContainer">${listHtml}</div>
+  `;
 }
 async function loadAll() {
   if (!ADMIN_TOKEN) { $('mainView').style.display = 'none'; $('loginView').style.display = 'block'; return; }
-  // ★ 拿当前过滤参数
+  // ★ 拿当前过滤参数(注意:反馈选项过滤已挪到卡片点击,这里不再传 key)
   const tr = $('timeRange').value;
-  const fk = $('fbKey').value;
   const trQ = tr ? '&time_range=' + encodeURIComponent(tr) : '';
-  const fkQ = fk ? '&key=' + encodeURIComponent(fk) : '';
   const [stats, users, diags, fbs, negatives] = await Promise.all([
     api('/api/admin/stats' + trQ),
     api('/api/admin/users' + trQ),
     api('/api/admin/diagnoses' + trQ),
-    api('/api/admin/feedbacks' + trQ + fkQ),
+    api('/api/admin/feedbacks' + trQ),  // 不带 key,让 _fbSelectedKey 在 refreshFbList 里控制
     api('/api/admin/negative-feedbacks?time_range=' + (tr || '24h')),
   ]);
   $('loginView').style.display = 'none';
@@ -1573,7 +1622,13 @@ async function loadAll() {
   $('tab-overview').innerHTML = renderOverview(stats.stats, stats.time_range);
   $('tab-users').innerHTML = renderUsers(users);
   $('tab-diagnoses').innerHTML = renderDiagnoses(diags);
-  $('tab-feedbacks').innerHTML = renderFeedbacks(fbs);
+  // ★ 反馈 tab:不重渲整个列表,只更新顶部卡片(用缓存的列表数据)
+  _lastDist = stats.stats.feedback_distribution || {};
+  $('tab-feedbacks').innerHTML = renderFeedbacks(_lastDist, _fbListCache);
+  // ★ 如果反馈 tab 还没加载过,自动加载一次(首次进入)
+  if (!_fbListCache && !_fbListLoading) {
+    refreshFbList();
+  }
 
   // ★ 渲染负面反馈高亮区
   if (negatives.feedbacks && negatives.feedbacks.length > 0) {
@@ -1613,6 +1668,51 @@ function stopLive() {
   $('liveStatus').textContent = '已暂停';
 }
 function toggleLive() { livePaused ? startLive() : stopLive(); }
+
+// ★ 反馈 tab:点击 A/B/C/D/E 卡片切换筛选
+function selectFbKey(k) {
+  if (_fbSelectedKey === k) {
+    _fbSelectedKey = null;  // 再次点击取消选中
+  } else {
+    _fbSelectedKey = k;
+  }
+  refreshFbList();  // 重新拉取列表
+}
+
+// ★ 反馈 tab:手动刷新按钮 / 切换选项时调用
+async function refreshFbList() {
+  if (!ADMIN_TOKEN) return;
+  if (_fbListLoading) return;  // 防抖:已有请求在跑
+  _fbListLoading = true;
+  // 立刻显示「加载中」
+  const tabEl = $('tab-feedbacks');
+  if (tabEl) tabEl.innerHTML = renderFeedbacks(_lastDist, _fbListCache);
+  try {
+    const tr = $('timeRange').value;
+    const fk = _fbSelectedKey;
+    const trQ = tr ? '&time_range=' + encodeURIComponent(tr) : '';
+    const fkQ = fk ? '&key=' + encodeURIComponent(fk) : '';
+    const fbs = await api('/api/admin/feedbacks' + trQ + fkQ);
+    _fbListCache = fbs;
+    if (tabEl) tabEl.innerHTML = renderFeedbacks(_lastDist, fbs);
+    const ts = $('fbLastRefresh');
+    if (ts) ts.textContent = '上次刷新: ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  } catch (e) {
+    alert('刷新失败: ' + e.message);
+  } finally {
+    _fbListLoading = false;
+  }
+}
+
+// ★ 缓存最新的 distribution(供 refreshFbList 重渲时用)
+let _lastDist = null;
+
+// ★ 时间范围切换:先 loadAll 刷新卡片,再 refreshFbList 同步列表
+async function onTimeRangeChange() {
+  _fbListCache = null;  // 旧列表作废,让 refreshFbList 重新拉
+  await loadAll();
+  await refreshFbList();
+}
 
 // 启动轮询(用户登录成功后由 doLogin 触发)
 if (ADMIN_TOKEN) { loadAll().then(startLive); }
