@@ -390,10 +390,11 @@ def serve_upload(filepath):
     """serve UPLOAD_DIR 下的图片,供前端 wx:image 组件直接 src"""
     # 安全:防止路径穿越(只能访问 UPLOAD_DIR 下文件)
     target = (UPLOAD_DIR / filepath).resolve()
+    print(f"[uploads] req path={request.path} target={target} exists={target.exists()}", file=sys.stderr)
     if not str(target).startswith(str(UPLOAD_DIR.resolve())):
         return jsonify({"ok": False, "error": "path traversal blocked"}), 403
     if not target.exists() or not target.is_file():
-        return jsonify({"ok": False, "error": "file not found"}), 404
+        return jsonify({"ok": False, "error": "file not found", "target": str(target), "upload_dir": str(UPLOAD_DIR)}), 404
     return send_file(str(target))
 
 
