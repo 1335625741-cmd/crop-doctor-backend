@@ -43,7 +43,7 @@ except ImportError:
     raise
 
 try:
-    from flask import Flask, request, jsonify, send_file
+    from flask import Flask, request, jsonify, send_file, Response
     from flask_cors import CORS
 except ImportError:
     print("需要安装: pip install flask flask-cors", file=sys.stderr)
@@ -498,7 +498,7 @@ def health():
     return jsonify({
         "ok": True,
         "ts": time.time(),
-        "version": "1.3.2",
+        "version": "1.3.3",
         "mode": "real" if real_backend else "demo",
         "real_backend": real_backend,
         "zhipu_configured": _zhipu_available(),
@@ -1468,8 +1468,19 @@ function switchTab(tab) {
 }
 async function api(path) {
   const sep = path.includes('?') ? '&' : '?';
-  const r = await fetch(path + sep + 'admin_token=' + encodeURIComponent(ADMIN_TOKEN));
-  if (r.status === 401) throw new Error('admin token 无效');
+  const fullUrl = path + sep + 'admin_token=' + encodeURIComponent(ADMIN_TOKEN);
+  const r = await fetch(fullUrl);
+  if (r.status === 401) throw new Error('admin token 无效 (401)');
+  if (!r.ok) {
+    // ★ 非 2xx(404/500/...),显式提示,方便排查
+    const t = await r.text();
+    throw new Error('HTTP ' + r.status + ' on ' + path + ' — ' + t.substring(0, 200));
+  }
+  const ct = r.headers.get('Content-Type') || '';
+  if (!ct.includes('application/json')) {
+    const t = await r.text();
+    throw new Error('非 JSON 响应 from ' + path + ' (Content-Type: ' + ct + ') — ' + t.substring(0, 200));
+  }
   return r.json();
 }
 function fmtTs(ts) {
@@ -1728,10 +1739,16 @@ def admin_page():
     token = (request.args.get("admin_token") or
              request.cookies.get("admin_token") or
              "").strip()
+    body = _ADMIN_HTML
     if not ADMIN_TOKEN or token != ADMIN_TOKEN:
         # 返登录页(包含 token 输入框)
-        return _ADMIN_HTML.replace('id="mainView" style="display:none;"', 'id="mainView" style="display:none;"'), 200
-    return _ADMIN_HTML, 200
+        body = _ADMIN_HTML.replace('id="mainView" style="display:none;"', 'id="mainView" style="display:none;"')
+    # ★ 强制不缓存,JS 升级时浏览器不会跑旧版
+    resp = Response(body, mimetype="text/html; charset=utf-8")
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.route("/admin/login", methods=["POST"])
