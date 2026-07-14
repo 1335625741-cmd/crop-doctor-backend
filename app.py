@@ -531,9 +531,9 @@ def diagnose():
     if image_files:
         # 图片模式
         if use_real and _zhipu_available():
-            return _diagnose_real(image_files, text_query)
+            return _diagnose_real(image_files)
         elif use_real and _matrix_available():
-            return _diagnose_real(image_files, text_query)
+            return _diagnose_real(image_files)
         return _diagnose_demo(image_files, text_query)
     else:
         # 纯文字模式
