@@ -498,7 +498,7 @@ def health():
     return jsonify({
         "ok": True,
         "ts": time.time(),
-        "version": "1.3.3",
+        "version": "1.3.4",
         "mode": "real" if real_backend else "demo",
         "real_backend": real_backend,
         "zhipu_configured": _zhipu_available(),
@@ -1620,7 +1620,8 @@ async function loadAll() {
   if (!ADMIN_TOKEN) { $('mainView').style.display = 'none'; $('loginView').style.display = 'block'; return; }
   // ★ 拿当前过滤参数(注意:反馈选项过滤已挪到卡片点击,这里不再传 key)
   const tr = $('timeRange').value;
-  const trQ = tr ? '&time_range=' + encodeURIComponent(tr) : '';
+  // ★ trQ 必须是 ? 开头(被拼到 path 后面,如果 & 开头会变成 /stats&... 这种坏 URL)
+  const trQ = tr ? '?time_range=' + encodeURIComponent(tr) : '';
   const [stats, users, diags, fbs, negatives] = await Promise.all([
     api('/api/admin/stats' + trQ),
     api('/api/admin/users' + trQ),
@@ -1701,8 +1702,9 @@ async function refreshFbList() {
   try {
     const tr = $('timeRange').value;
     const fk = _fbSelectedKey;
-    const trQ = tr ? '&time_range=' + encodeURIComponent(tr) : '';
-    const fkQ = fk ? '&key=' + encodeURIComponent(fk) : '';
+    // ★ 必须 ? 开头(同 loadAll 的修复)
+    const trQ = tr ? '?time_range=' + encodeURIComponent(tr) : '';
+    const fkQ = fk ? (trQ ? '&key=' : '?key=') + encodeURIComponent(fk) : '';
     const fbs = await api('/api/admin/feedbacks' + trQ + fkQ);
     _fbListCache = fbs;
     if (tabEl) tabEl.innerHTML = renderFeedbacks(_lastDist, fbs);
