@@ -7,3 +7,6 @@ cryptography>=3.0
 gunicorn>=21.0
 # 调智谱 GLM-4V API(Render 上跑真 AI)
 requests>=2.28
+
+# API 限流(诊断/反馈/登录,防刷量刷智谱)
+flask-limiter>=3.5

@@ -13,7 +13,7 @@ ENV PYTHONUNBUFFERED=1 \
 # 默认端口 7860(HuggingFace Spaces 强制)
 # Render 会自动注入 PORT=10000 覆盖(本 env 仅作默认值)
 # 本地 Docker 测试: docker run -p 7860:7860 ...
-ENV PORT=7860
+ENV PORT=80
 
 # 工作目录
 WORKDIR /app
@@ -32,7 +32,7 @@ COPY . /app/
 
 # gunicorn 监听 PORT env(Render=10000, 本地=7860)
 # shell 形式 CMD 让 ${PORT} 变量替换生效
-EXPOSE 7860
+EXPOSE 80
 
 # 启动 gunicorn(生产 WSGI)
 # - bind 0.0.0.0:${PORT}(Render 自动注入 PORT=10000,本地默认 7860)

@@ -43,7 +43,9 @@ except ImportError:
     raise
 
 try:
-    from flask import Flask, request, jsonify, send_file, Response
+    from flask import Flask, request, jsonify, send_file, Response, g
+    from flask_limiter import Limiter
+    from flask_limiter.util import get_remote_address
     from flask_cors import CORS
 except ImportError:
     print("需要安装: pip install flask flask-cors", file=sys.stderr)
@@ -437,12 +439,60 @@ IDENTIFIER_BIN_DIR = IDENTIFIER_SKILL_DIR / "bin"
 app = Flask(__name__)
 if ALLOWED_ORIGINS:
     CORS(app, origins=ALLOWED_ORIGINS)
-else:
-    CORS(app)
+
+# 限流触发时返 JSON(默认是 HTML,前端 fetch 会卡住)
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    return jsonify({
+        "ok": False,
+        "error": "rate_limit_exceeded",
+        "message": "请求太频繁,请稍后再试",
+        "limit": str(e.description) if hasattr(e, "description") else "见 X-RateLimit-* 头",
+    }), 429
+
+# ===== API 限流(防脚本刷量、刷智谱额度)=====
+# Render free tier 单 worker,内存存储够用;若以后多 worker,需换 Redis
+# 限制维度:IP(forwarded 优先,因为 Render 转发会带 X-Forwarded-For)
+def _rate_limit_key():
+    return (request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+            or request.remote_addr
+            or "unknown")
+
+limiter = Limiter(
+    key_func=_rate_limit_key,
+    app=app,
+    default_limits=[],  # 默认不限流,只在敏感端点单独加
+    storage_uri="memory://",
+    headers_enabled=True,  # 加 X-RateLimit-* 响应头
+)
+
+# 各端点限流规则(防止脚本把智谱额度刷爆)
+LIMITS = {
+    "diagnose":      "30 per hour",     # AI 诊断(走智谱,贵)
+    "diagnose_burst": "5 per minute",   # 突发保护
+    "identify":      "30 per hour",     # 作物识别
+    "feedback":      "20 per hour",     # 反馈
+    "wechat_login":  "10 per hour",     # 微信登录(jscode2session 限频)
+}
 
 UPLOAD_DIR = Path(tempfile.gettempdir()) / "crop_doctor_uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 FEEDBACK_FILE = SCRIPT_DIR / "feedback.jsonl"
+
+
+# ===== 法律文件路由(用户协议 / 隐私政策)=====
+LEGAL_DIR = Path(__file__).parent / "legal"
+
+@app.route("/legal/<name>")
+def serve_legal(name):
+    """提供用户协议 / 隐私政策的 HTML(给小程序 web-view 用)"""
+    # 只允许 4 个固定文件名,防止路径穿越
+    if name not in ("agreement.html", "privacy.html", "agreement", "privacy"):
+        return jsonify({"ok": False, "error": "not found"}), 404
+    file_path = LEGAL_DIR / name
+    if not file_path.exists():
+        return jsonify({"ok": False, "error": "file not found"}), 404
+    return send_file(str(file_path), mimetype="text/html; charset=utf-8")
 
 
 # ===== 静态文件服务(让前端能拿到上传的原图,做"已上传图片预览") =====
@@ -473,6 +523,10 @@ def serve_upload(filepath):
 
 
 # ===== 鉴权 =====
+# 三种信任方式(按优先级):
+#   1. 微信云托管注入 X-WX-OPENID + X-WX-APPID(可信,代表微信小程序请求)
+#   2. 客户端传 X-Auth-Token(必须匹配 CROP_DOCTOR_TOKEN)
+#   3. 白名单路径(/api/health, /admin, /uploads/* 等)
 @app.before_request
 def check_auth():
     PUBLIC_PATHS = {"/api/health", "/admin", "/admin/login", "/api/wechat-login"}
@@ -480,14 +534,32 @@ def check_auth():
     if request.path.startswith("/api/admin/"):
         return None
     # 静态文件(uploads/)是用户自己上传的图片,wx:image src 不带 token,需要公开
-    if request.path in PUBLIC_PATHS or request.path.startswith("/uploads/"):
+    if request.path in PUBLIC_PATHS or request.path.startswith("/uploads/") or request.path.startswith("/legal/"):
         return None
+
+    # ★ 方式 1:微信云托管自动注入 X-WX-OPENID(代表微信小程序发的请求,可信)
+    wx_openid = request.headers.get("X-WX-OPENID", "").strip()
+    wx_appid = request.headers.get("X-WX-APPID", "").strip()
+    if wx_openid and wx_appid:
+        # 存到 flask.g,后续 endpoint 可用 g.wx_openid
+        from flask import g
+        g.wx_openid = wx_openid
+        g.wx_appid = wx_appid
+        g.trust_source = "wxcloud"
+        return None  # 放行
+
+    # ★ 方式 2:客户端传 X-Auth-Token(自己测试/管理用)
     if not AUTH_TOKEN:
         return jsonify({"ok": False, "error": "服务端未配置 CROP_DOCTOR_TOKEN"}), 503
     token = request.headers.get("X-Auth-Token", "").strip()
-    if not token or token != AUTH_TOKEN:
-        return jsonify({"ok": False, "error": "Unauthorized"}), 401
-    return None
+    if token and token == AUTH_TOKEN:
+        from flask import g
+        g.wx_openid = None
+        g.wx_appid = None
+        g.trust_source = "token"
+        return None
+
+    return jsonify({"ok": False, "error": "Unauthorized"}), 401
 
 
 # ===== 健康检查 =====
@@ -498,7 +570,7 @@ def health():
     return jsonify({
         "ok": True,
         "ts": time.time(),
-        "version": "1.3.4",
+        "version": "1.4.1",
         "mode": "real" if real_backend else "demo",
         "real_backend": real_backend,
         "zhipu_configured": _zhipu_available(),
@@ -590,6 +662,7 @@ def _schedule_cleanup(session_dir, delay_seconds=3600):
 
 # ===== /api/identify(作物识别) =====
 @app.route("/api/identify", methods=["POST"])
+@limiter.limit(LIMITS["identify"])
 def identify():
     """第一阶段:识别作物是什么"""
     image_files = request.files.getlist("image")
@@ -664,6 +737,8 @@ def _identify_real(image_files):
 
 # ===== /api/diagnose(病害诊断,图片 OR 文字) =====
 @app.route("/api/diagnose", methods=["POST"])
+@limiter.limit(LIMITS["diagnose"])
+@limiter.limit(LIMITS["diagnose_burst"])
 def diagnose():
     """第二阶段:病害诊断
     - 有 image → 走图片模式(自动 chain identify)
@@ -677,9 +752,11 @@ def diagnose():
         return jsonify({"ok": False, "error": "请上传图片或输入症状描述"}), 400
 
     use_real = request.args.get("real") == "1"
-    # ★ 诊断请求里的 openid(前端从 storage 透传过来)
-    openid = (request.form.get("openid") or "").strip() or None
-    print(f"[diag-route] use_real={use_real} has_text={bool(text_query)} has_img={len(image_files)>0} openid={openid}", file=sys.stderr)
+    # ★ openid 优先级:微信云托管注入 > 前端透传
+    openid = (getattr(g, "wx_openid", None)
+              or request.form.get("openid")
+              or "").strip() or None
+    print(f"[diag-route] use_real={use_real} has_text={bool(text_query)} has_img={len(image_files)>0} openid={openid} trust={getattr(g,'trust_source','')}", file=sys.stderr)
 
     if image_files:
         # 图片模式
@@ -1017,6 +1094,7 @@ def _diagnose_real(image_files):
 
 # ===== 反馈 =====
 @app.route("/api/feedback", methods=["POST"])
+@limiter.limit(LIMITS["feedback"])
 def feedback():
     """提交反馈(存 SQLite, 取代原 feedback.jsonl)
 
@@ -1032,8 +1110,11 @@ def feedback():
     """
     try:
         data = request.get_json(force=True, silent=True) or {}
-        # 兼容老字段(顶级字段)
-        openid = data.get("openid") or data.get("openId")
+        # ★ openid 优先级:微信云托管注入 > 前端透传
+        openid = (getattr(g, "wx_openid", None)
+                  or data.get("openid")
+                  or data.get("openId")
+                  or "").strip() or None
         diagnosis_id = data.get("diagnosis_id") or data.get("diagnosisId")
         key = data.get("key")
         text = data.get("text") or data.get("remark")
@@ -1073,6 +1154,7 @@ def feedback():
 # 兜底模式:没配 WECHAT_APPID 时,返回 fake openid(只供本地体验,不能用于生产)
 # 解密降级:cryptography 库没装或解密失败,降级用前端明文 userInfoRaw
 @app.route("/api/wechat-login", methods=["POST"])
+@limiter.limit(LIMITS["wechat_login"])
 def wechat_login():
     data = request.get_json(force=True, silent=True) or {}
     code = (data.get("code") or "").strip()

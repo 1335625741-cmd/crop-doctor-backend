@@ -1,0 +1,43 @@
+# 微信云托管服务配置
+# 部署时微信云托管会读这个文件,自动配置服务名、镜像、端口等
+# 文档:https://developers.weixin.qq.com/miniprogram/dev/wxcloudrun/src/guide/service/config.html
+
+# 服务配置
+service:
+  name: crop-doctor-backend
+  desc: 征途问诊后端 - 作物病虫害 AI 诊断
+  # 端口 80(Dockerfile 暴露的端口)
+  port: 80
+  # 容器内启动命令(可省,Dockerfile 里有 CMD)
+  cmd: ""
+  # 资源规格(基础版够用)
+  cpu: 1
+  mem: 2
+  # 副本数
+  replica: 1
+  # 健康检查路径
+  livenessProbe:
+    path: /api/health
+    port: 80
+    initialDelaySeconds: 10
+    periodSeconds: 30
+
+# 构建配置
+build:
+  # Docker 构建
+  type: dockerfile
+  dockerfilePath: ./Dockerfile
+  dockerContext: .
+  # 构建参数
+  args: []
+
+# 环境变量(在微信云托管控制台也可以覆盖)
+env:
+  - key: PORT
+    value: "80"
+  - key: PYTHONUNBUFFERED
+    value: "1"
+  # 注意:以下敏感 env var 不要写在这里,去控制台 Secret 配置
+  # - ZHIPU_API_KEY
+  # - WECHAT_SECRET
+  # - CROP_DOCTOR_TOKEN
