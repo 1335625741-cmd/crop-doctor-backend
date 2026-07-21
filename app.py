@@ -585,7 +585,7 @@ def health():
     return jsonify({
         "ok": True,
         "ts": time.time(),
-        "version": "2.0.0",
+        "version": "2.1.0",
         "mode": "real" if real_backend else "demo",
         "real_backend": real_backend,
         "zhipu_configured": _zhipu_available(),
@@ -780,7 +780,8 @@ def _identify_real(image_files):
 
 
 # ====================================================================
-# ★★★ 2.0.0 重构:走 crop-disease-diagnosis skill v2.2 完整流程 ★★★
+# ★★★ 2.1.0 重构:走 crop-disease-diagnosis skill v2.2 完整流程 ★★★
+#   + db.py 智能选路径 (env / /data 实例存储 / /tmp fallback)
 # ====================================================================
 
 def _run_rag_diagnose(image_files, text_query, user_crop, user_context):
@@ -1027,7 +1028,7 @@ def diagnose_v2():
     full = result.get("full") or {}
     return jsonify({
         "ok": True,
-        "version": "2.0.0",
+        "version": "2.1.0",
         "image_type": image_type,
         "need_confirm": False,
         "need_confirm_data": None,
@@ -1076,7 +1077,7 @@ def consult_v2():
         return jsonify(result), 500
     return jsonify({
         "ok": True,
-        "version": "2.0.0",
+        "version": "2.1.0",
         "parsed": result.get("parsed", {}),
         "html": result.get("html"),
     })

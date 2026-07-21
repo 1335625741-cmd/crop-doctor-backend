@@ -7,21 +7,45 @@ db.py — SQLite 数据访问层
   - diagnoses: 诊断历史(每个用户每次诊断一条)
   - feedbacks: 用户反馈(每条反馈一条,关联到诊断)
 
-存储路径:优先用 DATA_DIR 环境变量,默认 /tmp/crop_doctor.db
-  - Render free tier: /tmp 在重启后会清,所以文档要说明"测试数据,生产请用真 DB"
-  - 未来可加 Render Persistent Disk 或外部 Postgres
+存储路径(2.1.0 实例存储支持):
+  1. 环境变量 CROP_DOCTOR_DB 显式指定 → 用它
+  2. 否则:
+     - /data/crop_doctor.db(云托管实例存储常见挂载点)可写 → 用它(推荐,容器重启不丢)
+     - /data 不可写(本地开发) → fallback 到 /tmp/crop_doctor.db(容器重启会清)
+  3. 启动时 print 实际使用的路径,方便排查
 
 数据加密:openid 是微信给的唯一标识,不算敏感;但 unionid/avatar/nickname 在反馈分析时可能用到
 """
 
 import os
 import sqlite3
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_PATH = Path(os.environ.get("CROP_DOCTOR_DB", "/tmp/crop_doctor.db"))
+
+def _resolve_db_path():
+    """决定 DB 文件放在哪:环境变量 → /data → /tmp"""
+    # 1. 显式环境变量优先
+    env = os.environ.get("CROP_DOCTOR_DB", "").strip()
+    if env:
+        return Path(env), "环境变量 CROP_DOCTOR_DB"
+
+    # 2. /data 存在且可写(云托管实例存储的常见挂载点)
+    data_dir = Path("/data")
+    if data_dir.is_dir() and os.access(str(data_dir), os.W_OK):
+        return data_dir / "crop_doctor.db", "/data(实例存储)"
+
+    # 3. fallback /tmp(本地开发,容器重启会清)
+    return Path("/tmp/crop_doctor.db"), "/tmp(本地或未挂载实例存储,重启会清!)"
+
+
+DB_PATH, DB_PATH_REASON = _resolve_db_path()
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# 启动时打印一行,方便排查
+print(f"[db] DB 路径: {DB_PATH} (原因: {DB_PATH_REASON})", file=sys.stderr)
 
 
 # ============================================================
