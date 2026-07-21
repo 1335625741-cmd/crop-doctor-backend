@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>作物病害诊断报告</title>
+<style>
+:root {
+  --bg: #f5f5f3;
+  --card: #ffffff;
+  --ink: #1f1f1f;
+  --ink-soft: #5a5a5a;
+  --line: #e8e6e0;
+  --green: #4a7c59;
+  --green-bg: #e8f1ea;
+  --green-border: #b8d4be;
+  --amber: #c8821f;
+  --amber-bg: #fcf3e3;
+  --red: #b94545;
+  --red-bg: #f7e4e4;
+  --serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif;
+  --sans: -apple-system, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--ink);
+  margin: 0;
+  padding: 32px 16px;
+  line-height: 1.6;
+  font-size: 15px;
+}
+.wrap { max-width: 920px; margin: 0 auto; }
+
+/* ===== 免责声明 ===== */
+.disclaimer {
+  background: #fff7e6;
+  border: 1px solid #f5d491;
+  border-left: 4px solid var(--amber);
+  border-radius: 8px;
+  padding: 14px 18px;
+  font-size: 13.5px;
+  color: #6b4a13;
+  margin-bottom: 18px;
+}
+.disclaimer strong { color: #8a5a0d; }
+
+/* ===== 顶部报告卡 ===== */
+.report-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 24px 28px;
+  margin-bottom: 18px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+}
+.tag {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--green);
+  background: var(--green-bg);
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-weight: 500;
+  margin-bottom: 12px;
+}
+h1.title {
+  font-family: var(--serif);
+  font-size: 26px;
+  font-weight: 600;
+  margin: 6px 0 12px;
+  color: #2a2a2a;
+  line-height: 1.35;
+}
+.user-q {
+  font-size: 14.5px;
+  color: var(--ink-soft);
+  margin: 0;
+}
+.user-q b { color: var(--ink); font-weight: 500; }
+
+/* ===== 结论卡片 ===== */
+.conclusion {
+  background: var(--green-bg);
+  border: 1px solid var(--green-border);
+  border-left: 4px solid var(--green);
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-bottom: 28px;
+  font-size: 14.5px;
+  color: #2c3e30;
+  line-height: 1.65;
+}
+.conclusion strong { color: #1e3a25; }
+
+/* ===== 关键指标卡片 ===== */
+.section-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 28px 0 12px;
+  color: #2a2a2a;
+}
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.metric {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+  text-align: left;
+}
+.metric .lbl {
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin-bottom: 4px;
+}
+.metric .val {
+  font-size: 22px;
+  font-weight: 600;
+  font-family: var(--serif);
+  color: var(--ink);
+  line-height: 1.2;
+}
+.metric .val .u { font-size: 13px; color: var(--ink-soft); font-weight: 400; margin-left: 2px; }
+.metric .sub {
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  margin-top: 6px;
+  line-height: 1.3;
+}
+.metric.warn .val { color: var(--amber); }
+.metric.danger .val { color: var(--red); }
+.metric.ok .val { color: var(--green); }
+
+/* ===== 视觉特征标签 ===== */
+.tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 24px; }
+.tag-chip {
+  background: #f4f3ee;
+  color: #4a4a4a;
+  padding: 5px 12px;
+  border-radius: 16px;
+  font-size: 12.5px;
+  border: 1px solid #ece9e1;
+}
+
+/* ===== 大表格 ===== */
+table.rx {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  font-size: 13.5px;
+}
+table.rx th {
+  background: #e8f1ea;
+  color: #2c4a35;
+  text-align: left;
+  padding: 11px 14px;
+  font-weight: 500;
+  font-size: 13px;
+  border-bottom: 1px solid var(--green-border);
+}
+table.rx td {
+  padding: 10px 14px;
+  border-bottom: 1px solid #f0eee8;
+  color: #2a2a2a;
+  vertical-align: top;
+}
+table.rx tr:last-child td { border-bottom: none; }
+table.rx tr:hover td { background: #fafaf7; }
+
+.cell-good { color: var(--green); font-weight: 500; }
+.cell-mid  { color: var(--amber); font-weight: 500; }
+.cell-bad  { color: var(--red); font-weight: 500; }
+
+/* 类型 badge — 强制一行显示,不换行 */
+.badge-protect, .badge-treat, .badge-mix, .badge-phys {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  width: auto;
+}
+.badge-protect { background: #e8f1ea; color: #2c4a35; }
+.badge-treat   { background: #fcecd6; color: #8a5a0d; }
+.badge-mix     { background: #efe1f3; color: #6b2c7c; }
+.badge-phys    { background: #e0eaf2; color: #1e3a5c; }
+
+/* ===== 现在能做的 ===== */
+ol.actions {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 18px 18px 18px 40px;
+  margin: 0 0 24px;
+}
+ol.actions li { padding: 4px 0; line-height: 1.6; }
+
+/* ===== 安全提醒 ===== */
+.alert {
+  background: #fff7e6;
+  border: 1px solid #f5d491;
+  border-left: 4px solid var(--amber);
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: #6b4a13;
+  margin: 14px 0 0;
+}
+.alert b { color: #8a5a0d; }
+
+/* ===== 反馈邀请 ===== */
+.feedback {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+  margin: 12px 0 0;
+}
+.fb-btn {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.footer-note {
+  text-align: center;
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin-top: 30px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- 免责声明 -->
+  <div class="disclaimer">
+    <strong>⚠️ 免责声明:</strong>本报告由 AI 辅助诊断生成,仅作技术参考。<b>严禁仅凭本报告用药或处置</b>。实际用药请严格遵守:① <b>当地农资店</b>的库存与建议、② <b>当地农技员</b>的现场指导、③ <b>药剂标签</b>的剂量和安全间隔期。结合具体气候、作物、生育期综合判断,如有疑问请联系当地植保站或农业部门。
+  </div>
+
+  <!-- 顶部报告卡 -->
+  <div class="report-card">
+    <span class="tag">作物病害诊断报告 · 2026-07</span>
+    <h1 class="title">黄瓜白粉病 — 大棚高发真菌病害诊断与处置方案</h1>
+    <p class="user-q">
+      <b>用户问题:</b>"我家黄瓜叶子正面有白色粉状斑块,大棚里通风不太好,是怎么回事?"
+      <br>
+      <b>上下文:</b>作物 = 黄瓜 · 病程 = 5 天 · 近期天气 = 大棚干燥通风差 · 部位 = 叶正面特写
+    </p>
+  </div>
+
+  <!-- 结论卡片 -->
+  <div class="conclusion">
+    <strong>结论:</strong>黄瓜<strong>白粉病</strong>(真菌病害,高置信度)。这是大棚黄瓜最常见的真菌病害之一,通风差 + 干燥闷热是真菌滋生的温床。<strong>药剂可治</strong>,首选乙嘧酚(特效,每年最多 2 次),与苯醚甲环唑/醚菌酯交替用;同时加强通风、摘病叶销毁,3 天可见效。先按 Top 1 方案处理,扩散或并发再找农技员。
+  </div>
+
+  <!-- 关键指标 -->
+  <div class="section-title">关键指标</div>
+  <div class="metrics">
+    <div class="metric warn">
+      <div class="lbl">严重程度</div>
+      <div class="val">🟡 中</div>
+      <div class="sub">若不处理一周内可能蔓延更多叶和果</div>
+    </div>
+    <div class="metric ok">
+      <div class="lbl">置信度</div>
+      <div class="val">⭐⭐⭐</div>
+      <div class="sub">高 · 3 个视觉特征匹配</div>
+    </div>
+    <div class="metric">
+      <div class="lbl">候选诊断</div>
+      <div class="val">1</div>
+      <div class="sub">未列鉴别诊断</div>
+    </div>
+    <div class="metric ok">
+      <div class="lbl">需联系农技员</div>
+      <div class="val">否</div>
+      <div class="sub">先按方案处理 3 天观察</div>
+    </div>
+    <div class="metric ok">
+      <div class="lbl">处方可用</div>
+      <div class="val">是</div>
+      <div class="sub">4 种药剂 + 1 物理方案</div>
+    </div>
+  </div>
+
+  <!-- 视觉特征 -->
+  <div class="section-title">关键视觉特征</div>
+  <div class="tags">
+    <span class="tag-chip">白色粉末状斑块</span>
+    <span class="tag-chip">近圆形散布</span>
+    <span class="tag-chip">部分连成一片</span>
+  </div>
+
+  <!-- 治疗方案大表格 -->
+  <div class="section-title">治疗方案(按候选分类)</div>
+  <table class="rx">
+    <thead>
+      <tr>
+        <th style="width: 12%">方案</th>
+        <th style="width: 14%">类型</th>
+        <th style="width: 32%">药剂</th>
+        <th style="width: 12%">剂量(每亩)</th>
+        <th style="width: 10%">兑水</th>
+        <th style="width: 20%">备注</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>🥇 Top 1</b><br><span style="color:var(--green); font-size:12px;">最可能</span></td>
+        <td colspan="5" style="background:#f8fbf9;"><b>黄瓜白粉病</b> <span style="color:var(--green); font-size:12px;">· 真菌 · 4 种药剂 + 1 物理</span></td>
+      </tr>
+      <tr>
+        <td>方案 1</td>
+        <td><span class="badge-protect">保护性</span></td>
+        <td>70% 甲基硫菌灵可湿性粉剂</td>
+        <td>20 g</td>
+        <td>15 kg</td>
+        <td>老药,便宜</td>
+      </tr>
+      <tr>
+        <td>方案 2</td>
+        <td><span class="badge-treat">治疗性</span></td>
+        <td>25% 乙嘧酚悬浮剂</td>
+        <td>20-25 ml</td>
+        <td>15 kg</td>
+        <td><span class="cell-good">特效</span>,但每年最多用 2 次</td>
+      </tr>
+      <tr>
+        <td>方案 3</td>
+        <td><span class="badge-treat">治疗性</span></td>
+        <td>10% 苯醚甲环唑(世高)</td>
+        <td>10 g</td>
+        <td>15 kg</td>
+        <td>与乙嘧酚交替</td>
+      </tr>
+      <tr>
+        <td>方案 4</td>
+        <td><span class="badge-treat">治疗性</span></td>
+        <td>30% 醚菌酯悬浮剂</td>
+        <td>15 ml</td>
+        <td>15 kg</td>
+        <td>安全性好,适合采收期</td>
+      </tr>
+      <tr>
+        <td>方案 5</td>
+        <td><span class="badge-phys">物理</span></td>
+        <td>硫磺粉</td>
+        <td>1-1.5 kg</td>
+        <td>喷粉</td>
+        <td><span class="cell-mid">大棚内慎用</span>,易出药害</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="alert">
+    <b>⏰ 打药时间:</b>下午 4 点后,避开中午高温<br>
+    <b>🔁 复喷:</b>7-10 天一次,连喷 2-3 次,与不同机制药剂交替用防抗药性<br>
+    <b>⚠️ 安全提醒:</b>以上方案仅供参考,实际使用请阅读药剂标签、咨询当地农资店、联系当地农技员
+  </div>
+
+  <!-- 现在能做的 -->
+  <div class="section-title">现在能做的(今晚就能动手)</div>
+  <ol class="actions">
+    <li>动作要轻,将发病严重的叶片摘除,用塑料袋装好带出大棚深埋或销毁,千万不要直接扔在地里</li>
+    <li>白天适当加大通风,改善大棚内的空气流通,打破病菌喜欢的闷热环境</li>
+    <li>尽快到农资店购买治疗白粉病的专用杀菌剂(三唑类或甲氧基丙烯酸酯类),按说明书兑水全株喷雾</li>
+    <li>打药时注意叶片正反面都要打透</li>
+  </ol>
+
+  <!-- 反馈邀请 -->
+  <div class="section-title">反馈邀请</div>
+  <p style="color: var(--ink-soft); font-size: 13.5px; margin: 0 0 8px;">按上面的建议处理后,问题有没有改善?</p>
+  <div class="feedback">
+    <div class="fb-btn"><b>A</b><br>解决了</div>
+    <div class="fb-btn"><b>B</b><br>改善一些</div>
+    <div class="fb-btn"><b>C</b><br>没变化</div>
+    <div class="fb-btn"><b>D</b><br>恶化了</div>
+    <div class="fb-btn"><b>E</b><br>还没处理</div>
+  </div>
+  <p style="color: var(--ink-soft); font-size: 12.5px; margin-top: 10px;">直接回 A/B/C/D/E 就行,我好根据情况调整建议。</p>
+
+  <div class="footer-note">
+    报告生成时间:2026-07-06 16:31 · 诊断耗时 20.4s · AI 辅助诊断仅供参考
+  </div>
+
+</div>
+</body>
+</html>

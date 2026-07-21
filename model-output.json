@@ -1,0 +1,33 @@
+{
+  "query_raw": {
+    "code": 0,
+    "message": "ok",
+    "results": [
+      {
+        "success": true,
+        "description": "叶正面可见纯黑色圆形病斑，边界清晰无轮纹，表面未见明显霉层、粉状物或菌脓。",
+        "error": ""
+      }
+    ],
+    "base_resp": {
+      "status_code": 0,
+      "status_msg": "success"
+    }
+  },
+  "diagnose_raw": {
+    "code": 0,
+    "message": "ok",
+    "results": [
+      {
+        "success": true,
+        "description": "{\n  \"diagnosis\": [\n    {\n      \"name\": \"番茄细菌性斑点病\",\n      \"category\": \"病害\",\n      \"confidence\": \"高\",\n      \"probability\": 0.85,\n      \"reasoning\": \"根据用户图像描述，叶正面可见纯黑色圆形病斑且边界清晰、无轮纹，这与参考图5（番茄细菌性斑点病）中提到的‘散生深褐色至黑色小圆斑，边缘较清晰’的特征高度吻合。虽然检索库中早疫病得分较高，但早疫病典型特征为‘同心轮纹’，图像明确无轮纹，故排除早疫病，优先相信视觉特征认定为细菌性斑点病。\",\n      \"key_visual_clues\": [\n        \"纯黑色圆形病斑\",\n        \"边界清晰\",\n        \"无同心轮纹\",\n        \"无霉层和菌脓\"\n      ]\n    },\n    {\n      \"name\": \"番茄早疫病\",\n      \"category\": \"病害\",\n      \"confidence\": \"低\",\n      \"probability\": 0.15,\n      \"reasoning\": \"检索库推荐了多次早疫病，但早疫病通常具有明显的同心轮纹，当前病斑可能处于极早期未显现轮纹，但可能性较低。\",\n      \"key_visual_clues\": [\n        \"圆形病斑\"\n      ]\n    }\n  ],\n  \"severity\": \"轻\",\n  \"cause_summary\": \"由细菌感染引起的病害，多在低温高湿环境下发生，通过雨水或灌溉水传播。\",\n  \"need_expert\": false,\n  \"expert_reason\": \"\",\n  \"rag_used\": {\n    \"top1_disease\": \"番茄早疫病\",\n    \"top2_disease\": \"番茄叶霉病\",\n    \"top3_disease\": \"番茄早疫病\"\n  }\n}",
+        "error": ""
+      }
+    ],
+    "base_resp": {
+      "status_code": 0,
+      "status_msg": "success"
+    }
+  },
+  "ref_count": 5
+}

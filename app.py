@@ -30,6 +30,7 @@ import json
 import disease_kb
 import os
 import shutil
+import subprocess
 import threading
 import sys
 import tempfile
@@ -75,6 +76,8 @@ ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("CROP_DOCTOR_ORIGINS", "").
 # 微信小程序凭证(用于 jscode2session 换 openid)
 # 在微信公众平台 → 开发 → 开发管理 → 开发设置 → 小程序 AppID / AppSecret
 WECHAT_APPID = os.environ.get("WECHAT_APPID", "").strip()
+# RAG 图库根目录(本地有图库时填,云托管默认空走 demo)
+CROP_DOCTOR_DB_ROOT = os.environ.get("CROP_DOCTOR_DB_ROOT", "").strip()
 WECHAT_SECRET = os.environ.get("WECHAT_SECRET", "").strip()
 
 # 智谱 GLM-4V API(用于真 AI 诊断,Render 部署必备)
@@ -432,7 +435,19 @@ def decrypt_wechat_data(session_key_b64, encrypted_data_b64, iv_b64):
 
 
 SKILL_DIR = SCRIPT_DIR.parent.parent / "skills" / "crop-disease-diagnosis"
-SKILL_BIN_DIR = SKILL_DIR / "bin"
+# ★ 优先用后端自带的 bin/(已 copy),然后 fallback 到 skill 原位置
+_LOCAL_BIN_DIR = SCRIPT_DIR / "bin"
+if _LOCAL_BIN_DIR.exists():
+    SKILL_BIN_DIR = _LOCAL_BIN_DIR
+else:
+    SKILL_BIN_DIR = SKILL_DIR / "bin"
+# references 同样优先用本地
+_LOCAL_REFS_DIR = SCRIPT_DIR / "references"
+if _LOCAL_REFS_DIR.exists():
+    SKILL_REFS_DIR = _LOCAL_REFS_DIR
+else:
+    SKILL_REFS_DIR = SKILL_DIR / "references"
+# crop-identifier 暂用 SKILL_DIR
 IDENTIFIER_SKILL_DIR = SCRIPT_DIR.parent.parent / "skills" / "crop-identifier"
 IDENTIFIER_BIN_DIR = IDENTIFIER_SKILL_DIR / "bin"
 
@@ -570,13 +585,31 @@ def health():
     return jsonify({
         "ok": True,
         "ts": time.time(),
-        "version": "1.4.1",
+        "version": "2.0.0",
         "mode": "real" if real_backend else "demo",
         "real_backend": real_backend,
         "zhipu_configured": _zhipu_available(),
         "matrix_configured": _matrix_available(),
         "wechat_configured": bool(WECHAT_APPID and WECHAT_SECRET),
     })
+
+
+# ===== Debug:看实际请求(本地 debug 用) =====
+# ★ 生产环境打包时会被排除(见 _build_zip.py)
+@app.route("/api/_debug_echo", methods=["POST", "GET", "OPTIONS"])
+def debug_echo():
+    """看云托管网关到底转发了什么头/body(本地 debug 用)"""
+    raw = request.data or b''
+    info = {
+        "method": request.method,
+        "content_type": request.content_type,
+        "is_json": request.is_json,
+        "content_length": request.content_length,
+        "raw_data_len": len(raw),
+        "raw_data_bytes_hex": raw[:50].hex(),
+        "raw_data_ascii_safe": ''.join(chr(b) if 32 <= b < 127 else '?' for b in raw[:200]),
+    }
+    return jsonify(info)
 
 
 def _matrix_available():
@@ -635,6 +668,16 @@ def _save_images_to_tmp(image_files, prefix="img"):
         saved_paths.append(str(save_path))
         print(f"[save] {save_path}: size={len(raw)} head={raw[:8].hex()} tail={raw[-8:].hex()}", file=sys.stderr)
     return saved_paths, session_dir
+
+
+def _get_field(name, default=""):
+    """统一从 request.form 拿字段(v1.5.1 修过自递归 bug,2.0 重构时误删,这里补回)
+
+    ★ 不要写成 (_get_field(name) or '').strip() or default —— 那会无限自递归
+       必须直接用 request.form.get()
+    """
+    v = request.form.get(name)
+    return v if v is not None else default
 
 
 def _schedule_cleanup(session_dir, delay_seconds=3600):
@@ -698,9 +741,9 @@ def _identify_real(image_files):
     saved_paths, session_dir = _save_images_to_tmp(image_files, prefix="identify")
     try:
         # 构造 identify prompt
-        parts = (request.form.get("parts") or "").strip() or None
-        location = (request.form.get("location") or "").strip() or None
-        season = (request.form.get("season") or "").strip() or None
+        parts = (_get_field("parts") or "").strip() or None
+        location = (_get_field("location") or "").strip() or None
+        season = (_get_field("season") or "").strip() or None
 
         extra = []
         if parts:
@@ -735,361 +778,308 @@ def _identify_real(image_files):
         _schedule_cleanup(session_dir, delay_seconds=3600)
 
 
-# ===== /api/diagnose(病害诊断,图片 OR 文字) =====
+
+# ====================================================================
+# ★★★ 2.0.0 重构:走 crop-disease-diagnosis skill v2.2 完整流程 ★★★
+# ====================================================================
+
+def _run_rag_diagnose(image_files, text_query, user_crop, user_context):
+    """真实模式:调 diagnose_with_rag.py 走 RAG 增强路径"""
+    saved_paths, session_dir = _save_images_to_tmp(image_files, prefix="rag_diagnose")
+    print(f"[rag] saved {len(saved_paths)} images to {session_dir}", file=sys.stderr)
+    try:
+        if not SKILL_BIN_DIR.exists() or not (SKILL_BIN_DIR / "diagnose_with_rag.py").exists():
+            return {"ok": False, "error": "diagnose_with_rag.py 不存在,无法走 RAG 路径"}
+        duration = user_context.get("duration") or ""
+        weather = user_context.get("weather") or ""
+        chemical = user_context.get("chemical") or ""
+        cmd = [
+            sys.executable,
+            str(SKILL_BIN_DIR / "diagnose_with_rag.py"),
+            "-i", saved_paths[0],
+        ]
+        for p in saved_paths[1:]:
+            cmd.extend(["-i", p])
+        if user_crop:
+            cmd.extend(["-c", user_crop])
+        if duration:
+            cmd.extend(["-d", duration])
+        if weather:
+            cmd.extend(["-w", weather])
+        if chemical:
+            cmd.extend(["-m", chemical])
+        output_json = session_dir / "full-diagnosis-with-rag.json"
+        cmd.extend(["--output", str(output_json)])
+        db_root = os.environ.get("CROP_DOCTOR_DB_ROOT", "")
+        if db_root:
+            cmd.extend(["--db-root", db_root])
+        print(f"[rag] cmd: {' '.join(cmd[:5])}... + {len(cmd)-5} more", file=sys.stderr)
+        try:
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "RAG 诊断超时(>300s)"}
+        try:
+            stdout = result.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            stdout = result.stdout.decode("latin-1", errors="replace")
+        try:
+            stderr = result.stderr.decode("utf-8")
+        except UnicodeDecodeError:
+            stderr = result.stderr.decode("latin-1", errors="replace")
+        if result.returncode != 0:
+            return {"ok": False, "error": "RAG 诊断失败: " + (stderr[-300:] or "未知"), "stdout_tail": stdout[-500:]}
+        if not output_json.exists():
+            return {"ok": False, "error": "RAG 未产出 full-diagnosis-with-rag.json"}
+        with open(output_json, "r", encoding="utf-8") as f:
+            full = json.load(f)
+        # 渲染 HTML
+        html = None
+        try:
+            html_proc = subprocess.run(
+                [sys.executable, str(SKILL_BIN_DIR / "render_html_report.py"), "-i", str(output_json)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+            )
+            try:
+                html = html_proc.stdout.decode("utf-8")
+            except UnicodeDecodeError:
+                html = html_proc.stdout.decode("latin-1", errors="replace")
+            if html_proc.returncode != 0:
+                print(f"[rag] HTML render fail", file=sys.stderr)
+                html = None
+        except Exception as e:
+            print(f"[rag] HTML render exception: {e}", file=sys.stderr)
+            html = None
+        return {"ok": True, "full": full, "html": html, "saved_paths": saved_paths}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": "RAG 诊断异常: " + str(e), "traceback": traceback.format_exc()[-1500:]}
+    finally:
+        _schedule_cleanup(session_dir, delay_seconds=3600)
+
+
+def _run_consult_text(text_query, user_crop=None, location=None, context=None):
+    """文字咨询路径(无图):走 crop-pest-text-advisor 内化逻辑"""
+    try:
+        if not SKILL_BIN_DIR.exists() or not (SKILL_BIN_DIR / "render_consult_html.py").exists():
+            return {"ok": False, "error": "render_consult_html.py 不存在,无法走文字咨询路径"}
+        consult_input = {
+            "user_question": text_query,
+            "summary": (text_query[:30] + "...") if len(text_query) > 30 else text_query,
+            "crop": user_crop or "",
+            "location": location or "",
+            "context": context or "",
+            "cause": "基于您描述的症状,以下是常见原因参考(具体诊断需结合图片)",
+            "treatments": [],
+            "spray_schedule": "7-10 天一次,连喷 2-3 次,采收前 7-14 天停药(具体看药剂标签)",
+            "mixing_rotation": "三唑类 → 甲氧基丙烯酸酯类 → 苯并咪唑类 三循环,避免同种药剂连续使用",
+            "differential": [
+                {"name": "请上传照片", "key_diff": "光看文字无法确诊,建议上传 4 张照片(特写/另一面/整体/受害部位)走 RAG 路径"},
+            ],
+            "symptoms": "文字咨询路径不展示具体症状(需要图片诊断)",
+            "ag_control": "1. 加强田间巡查 2. 及时清除病叶 3. 改善通风 4. 轮作换茬",
+            "need_expert": True,
+        }
+        consult_json_path = Path(tempfile.gettempdir()) / f"consult_input_{int(time.time() * 1000)}.json"
+        with open(consult_json_path, "w", encoding="utf-8") as f:
+            json.dump(consult_input, f, ensure_ascii=False, indent=2)
+        output_html = Path(tempfile.gettempdir()) / f"consult_output_{int(time.time() * 1000)}.html"
+        cmd = [
+            sys.executable,
+            str(SKILL_BIN_DIR / "render_consult_html.py"),
+            "-i", str(consult_json_path),
+            "-o", str(output_html),
+        ]
+        try:
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "render_consult_html 超时"}
+        try:
+            stdout = result.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            stdout = result.stdout.decode("latin-1", errors="replace")
+        try:
+            stderr = result.stderr.decode("utf-8")
+        except UnicodeDecodeError:
+            stderr = result.stderr.decode("latin-1", errors="replace")
+        if result.returncode != 0:
+            return {"ok": False, "error": "render_consult_html 失败: " + stderr[-300:]}
+        if not output_html.exists():
+            return {"ok": False, "error": "render_consult_html 未产出文件"}
+        with open(output_html, "r", encoding="utf-8") as f:
+            html = f.read()
+        try:
+            consult_json_path.unlink()
+        except OSError:
+            pass
+        return {"ok": True, "html": html, "parsed": consult_input}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": "文字咨询异常: " + str(e), "traceback": traceback.format_exc()[-1500:]}
+
+
+def _build_demo_diagnose(image_files, text_query, user_crop, user_context):
+    """demo 模式:返回简单占位结构"""
+    if image_files:
+        saved_paths, session_dir = _save_images_to_tmp(image_files, prefix="demo_diagnose")
+        try:
+            full = {
+                "diagnosis": {
+                    "diagnosis": [{"name": "示例诊断(演示)", "probability": 0.5, "confidence": "中"}],
+                    "severity": "中",
+                    "cause_summary": "demo 模式:这是固定占位,不是真实 AI 诊断。生产环境请切换到真实模式。",
+                    "immediate_actions": ["1. 上传真实图片", "2. 切换到真实模式"],
+                    "need_expert": False,
+                },
+                "top_diagnosis_name": "示例诊断(演示)",
+                "prescription": {"available": False, "title": "", "content": ""},
+                "metadata": {"image_count": len(image_files), "crop": user_crop, "backend": "demo"},
+                "_is_demo": True,
+            }
+            return {"ok": True, "full": full, "html": None, "saved_paths": saved_paths}
+        finally:
+            _schedule_cleanup(session_dir, delay_seconds=3600)
+    else:
+        full = {
+            "diagnosis": {
+                "diagnosis": [{"name": "示例诊断(演示)", "probability": 0.5, "confidence": "中"}],
+                "severity": "中",
+                "cause_summary": "demo 模式:纯文字,关键词匹配,不是真实 AI 诊断",
+                "immediate_actions": ["1. 上传图片走 RAG 路径", "2. 切换到真实模式"],
+                "need_expert": False,
+            },
+            "top_diagnosis_name": "示例诊断(演示)",
+            "prescription": {"available": False, "title": "", "content": ""},
+            "metadata": {"image_count": 0, "crop": user_crop, "backend": "demo"},
+            "_is_demo": True,
+        }
+        return {"ok": True, "full": full, "html": None, "saved_paths": []}
+
+
+# ===== /api/diagnose 2.0:重写主路由 =====
 @app.route("/api/diagnose", methods=["POST"])
 @limiter.limit(LIMITS["diagnose"])
 @limiter.limit(LIMITS["diagnose_burst"])
-def diagnose():
-    """第二阶段:病害诊断
-    - 有 image → 走图片模式(自动 chain identify)
-    - 有 text  无 image → 走文字模式(LLM 文字问诊)
-    - 两个都没有 → 400
-    """
-    image_files = request.files.getlist("image")
-    text_query = (request.form.get("text") or "").strip()
+def diagnose_v2():
+    """v2.0 诊断主路由 — 走 crop-disease-diagnosis skill v2.2 完整流程"""
+    is_json = request.is_json or (request.content_type or '').startswith('application/json')
+    image_files = []
+    if is_json:
+        try:
+            data_json = request.get_json(silent=True) or {}
+        except Exception:
+            data_json = {}
+        text_query = (data_json.get("text") or "").strip()
+        user_crop = (data_json.get("crop") or "").strip()
+        context = data_json.get("context") or {}
+        if not hasattr(g, "_json_data"):
+            g._json_data = data_json
+        images_b64 = data_json.get("images_base64") or []
+        if isinstance(data_json.get("image_base64"), str):
+            images_b64 = [data_json.get("image_base64")]
+        from werkzeug.datastructures import FileStorage
+        from io import BytesIO
+        for idx, b64str in enumerate(images_b64):
+            try:
+                if "," in b64str:
+                    b64str = b64str.split(",", 1)[1]
+                raw = __import__('base64').b64decode(b64str)
+                fs = FileStorage(stream=BytesIO(raw), filename=f"json_{idx}.jpg", content_type="image/jpeg")
+                image_files.append(fs)
+            except Exception as e:
+                print(f"[diag-v2] base64 decode err idx={idx}: {e}", file=sys.stderr)
+    else:
+        image_files = request.files.getlist("image")
+        text_query = (_get_field("text") or "").strip()
+        user_crop = (_get_field("crop") or "").strip()
+        context_str = (_get_field("context") or "").strip()
+        context = {}
+        if context_str:
+            try:
+                import json as _json_mod
+                context = _json_mod.loads(context_str)
+            except Exception:
+                context = {"raw": context_str}
 
     if not image_files and not text_query:
         return jsonify({"ok": False, "error": "请上传图片或输入症状描述"}), 400
 
     use_real = request.args.get("real") == "1"
-    # ★ openid 优先级:微信云托管注入 > 前端透传
-    openid = (getattr(g, "wx_openid", None)
-              or request.form.get("openid")
-              or "").strip() or None
-    print(f"[diag-route] use_real={use_real} has_text={bool(text_query)} has_img={len(image_files)>0} openid={openid} trust={getattr(g,'trust_source','')}", file=sys.stderr)
-
-    if image_files:
-        # 图片模式
-        if use_real and _zhipu_available():
-            return _save_diagnosis_then_return(
-                _diagnose_real(image_files), openid, image_count=len(image_files), is_text_only=False)
-        elif use_real and _matrix_available():
-            return _save_diagnosis_then_return(
-                _diagnose_real(image_files), openid, image_count=len(image_files), is_text_only=False)
-        return _save_diagnosis_then_return(
-            _diagnose_demo(image_files, text_query), openid, image_count=len(image_files), is_text_only=False)
+    if is_json and hasattr(g, "_json_data"):
+        openid = (getattr(g, "wx_openid", None) or g._json_data.get("openid") or "").strip() or None
     else:
-        # 纯文字模式
-        if use_real and _zhipu_available():
-            return _save_diagnosis_then_return(
-                _consult_real(text_query), openid, image_count=0, is_text_only=True)
-        elif use_real and _matrix_available():
-            return _save_diagnosis_then_return(
-                _consult_real(text_query), openid, image_count=0, is_text_only=True)
-        return _save_diagnosis_then_return(
-            _consult_demo(text_query), openid, image_count=0, is_text_only=True)
+        openid = (getattr(g, "wx_openid", None) or _get_field("openid") or "").strip() or None
+    print(f"[diag-v2] real={use_real} text={bool(text_query)} img={len(image_files)} crop='{user_crop}' openid={openid}", file=sys.stderr)
+
+    image_type = "crop_disease"  # 默认,真实模式可由 GLM-4V 判
+
+    if use_real and image_files:
+        result = _run_rag_diagnose(image_files, text_query, user_crop, context)
+    elif use_real and not image_files:
+        result = _run_consult_text(text_query, user_crop, context.get("location"), context)
+    elif image_files:
+        result = _build_demo_diagnose(image_files, text_query, user_crop, context)
+    else:
+        result = _build_demo_diagnose([], text_query, user_crop, context)
+
+    if not result.get("ok"):
+        return jsonify(result), 500
+
+    full = result.get("full") or {}
+    return jsonify({
+        "ok": True,
+        "version": "2.0.0",
+        "image_type": image_type,
+        "need_confirm": False,
+        "need_confirm_data": None,
+        "crop_id_method": "manual",
+        "crop_id_result": full.get("_identified_crop"),
+        "parsed": full.get("diagnosis", {}),
+        "full": full,
+        "html": result.get("html"),
+        "saved_paths": result.get("saved_paths", []),
+        "fallback_reason": None,
+        "_is_demo": full.get("_is_demo", False),
+    })
 
 
-def _save_diagnosis_then_return(resp, openid, image_count, is_text_only):
-    """从 resp(Flask Response)解析出诊断结果,入库一条 diagnoses,再原样返 resp
+# ===== /api/consult v2:文字咨询路径 =====
+@app.route("/api/consult", methods=["POST"])
+@limiter.limit(LIMITS["diagnose"])
+@limiter.limit(LIMITS["diagnose_burst"])
+def consult_v2():
+    """v2.0 文字咨询 — 走 crop-pest-text-advisor 内化逻辑"""
+    is_json = request.is_json or (request.content_type or '').startswith('application/json')
+    if is_json:
+        try:
+            data_json = request.get_json(silent=True) or {}
+        except Exception:
+            data_json = {}
+        text_query = (data_json.get("text") or "").strip()
+        user_crop = (data_json.get("crop") or "").strip()
+        location = (data_json.get("location") or "").strip()
+        context_str = (data_json.get("context") or "").strip()
+        if not hasattr(g, "_json_data"):
+            g._json_data = data_json
+    else:
+        text_query = (_get_field("text") or "").strip()
+        user_crop = (_get_field("crop") or "").strip()
+        location = (_get_field("location") or "").strip()
+        context_str = (_get_field("context") or "").strip()
 
-    resp 是 _diagnose_real/_consult_real/_demo 返回的 jsonify 对象
-    """
-    try:
-        # 拿 resp 的 JSON 数据
-        data = resp.get_json() if hasattr(resp, 'get_json') else None
-        # ★ 诊断响应不一定有 'ok' 字段(后端 _diagnose_real / _consult_real 不主动加)
-        #    用 'diagnosis' 字段存在 + 不在 demo 模式 判定为有效
-        if not data:
-            print(f"[diag-save] skip: data=None, openid={openid}", file=sys.stderr)
-            return resp
-        is_demo_resp = bool(data.get('_is_demo'))  # demo 模式不入库
-        if is_demo_resp:
-            print(f"[diag-save] skip: demo mode, openid={openid}", file=sys.stderr)
-            return resp
-        if not data.get('diagnosis') and not data.get('_identified_crop'):
-            print(f"[diag-save] skip: no diagnosis or identified_crop, openid={openid}", file=sys.stderr)
-            return resp
-        # 兼容两种结构(嵌套 / 扁平)
-        diag_root = data.get('diagnosis') or {}
-        # 嵌套: { diagnosis: { diagnosis: [...], treatment, primary_crop } }
-        if isinstance(diag_root, dict):
-            diag = diag_root
-            top = (diag.get('diagnosis') or [{}])[0] if isinstance(diag.get('diagnosis'), list) else {}
-            primary_crop = diag.get('primary_crop') or {}
-            is_kb_hit = bool(data.get('_kb_hit') or data.get('_no_need_image'))
-            is_demo = bool(data.get('_is_demo') or diag.get('_is_demo'))
-        # 扁平: { diagnosis: [...], primary_crop, treatment, _kb_hit, ... }
-        else:
-            top = (diag_root[0] if isinstance(diag_root, list) and diag_root else {}) or {}
-            primary_crop = data.get('primary_crop') or {}
-            is_kb_hit = bool(data.get('_kb_hit') or data.get('_no_need_image'))
-            is_demo = bool(data.get('_is_demo'))
-        if openid:
-            _db.insert_diagnosis(
-                openid=openid,
-                crop=primary_crop.get('name_zh') if isinstance(primary_crop, dict) else None,
-                disease_name=top.get('name') if isinstance(top, dict) else None,
-                severity=top.get('severity') if isinstance(top, dict) else None,
-                probability=top.get('probability') if isinstance(top, dict) else None,
-                image_count=image_count,
-                is_text_only=is_text_only,
-                is_kb_hit=is_kb_hit,
-                is_demo=is_demo,
-                source='real' if not is_demo else 'demo',
-            )
-    except Exception as e:
-        import traceback
-        print(f"[diag-save] ⚠️ 入库失败: {e}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-    print(f"[diag-save] saved: openid={openid}, image_count={image_count}, is_text={is_text_only}", file=sys.stderr)
-    return resp
+    if not text_query:
+        return jsonify({"ok": False, "error": "请输入症状描述或问题"}), 400
 
-
-def _diagnose_demo(image_files, text_query=""):
-    """demo 模式:返回一对(diagnosis, identified_crop)"""
-    # 优先按文字关键词挑,否则按图片 hash
-    pair = _pick_pair_by_text(text_query) if text_query else None
-    if not pair:
-        h = hashlib.md5()
-        for f in image_files:
-            h.update((f.filename or "").encode("utf-8"))
-            f.seek(0, 2)
-            h.update(str(f.tell()).encode("utf-8"))
-            f.seek(0)
-        seed = int(h.hexdigest()[:8], 16)
-        pair = pick_pair(image_count=len(image_files), seed=seed)
-    diagnosis, identified = pair
-
-    # ★ 关键:把识别结果嵌入诊断返回
-    diagnosis["_is_demo"] = True
-    diagnosis["_demo_reason"] = "服务端 demo 模式:返回固定诊断 + 固定识别结果,不是基于图片分析"
-    diagnosis["_identified_crop"] = identified
-    diagnosis["_chain"] = {
-        "stage1_identified": True,
-        "stage2_diagnosed": True,
-        "identified_crop_name": (identified.get("primary_crop") or {}).get("name_zh"),
-        "auto_chainable": any(d.get("auto_chainable") for d in identified.get("downstream_skills", [])),
-    }
-    return jsonify(diagnosis)
-
-
-# ===== 文字问诊 =====
-KEYWORD_MAP = [
-    (["番茄", "tomato", "叶黑圈", "同心轮纹", "早疫"], 0),  # 番茄
-    (["水稻", "稻子", "稻瘟", "穗颈瘟", "叶瘟"], 1),         # 水稻
-    (["黄瓜", "cucumber", "白粉", "面粉", "霜霉"], 2),         # 黄瓜
-    (["柑橘", "橘子", "黄龙", "斑驳", "黄化", "缺锌"], 3),     # 柑橘
-    (["玉米", "棒子", "大斑", "小斑", "梭形"], 4),            # 玉米
-]
-
-
-def _pick_pair_by_text(text):
-    """按文字关键词挑 mock,没匹配返回 None"""
-    if not text:
-        return None
-    lower = text.lower()
-    for keywords, idx in KEYWORD_MAP:
-        for kw in keywords:
-            if kw.lower() in lower:
-                from embedded_mocks import MOCK_PAIR
-                import copy
-                return copy.deepcopy(MOCK_PAIR[idx][0]), copy.deepcopy(MOCK_PAIR[idx][1])
-    return None
-
-
-def _consult_demo(text_query):
-    """文字问诊 demo 模式:按关键词挑 mock"""
-    pair = _pick_pair_by_text(text_query)
-    if not pair:
-        # 没匹配:随机挑 + 提示"请补充作物名"
-        import random
-        idx = random.randint(0, 4)
-        from embedded_mocks import MOCK_PAIR
-        import copy
-        pair = (copy.deepcopy(MOCK_PAIR[idx][0]), copy.deepcopy(MOCK_PAIR[idx][1]))
-
-    diagnosis, identified = pair
-
-    diagnosis["_is_demo"] = True
-    diagnosis["_is_text_only"] = True
-    diagnosis["_demo_reason"] = (
-        "服务端 demo 模式:基于您输入的文字关键词匹配到 1 份预置诊断。"
-        "要接真实 AI,请在服务端启用 ?real=1 模式(需配置 mavis + matrix)。"
-    )
-    diagnosis["_identified_crop"] = identified
-    diagnosis["_chain"] = {
-        "stage1_identified_by": "text_keyword",
-        "stage2_diagnosed_by": "demo_template",
-        "identified_crop_name": (identified.get("primary_crop") or {}).get("name_zh"),
-        "auto_chainable": True,
-    }
-    return jsonify(diagnosis)
-
-
-def _consult_real(text_query):
-    """文字问诊真实模式:
-    1. 先查 disease_kb(常见病知识库),命中 → 直接出方案,不再要求补图
-    2. 不命中 → 调智谱 GLM-4V 文字版,根据用户描述给出诊断
-    """
-    # ★ 1. 知识库直出(零延迟,覆盖 45 个常见病/虫害/缺素/药害)
-    kb_match = disease_kb.search_kb(text_query)
-    if kb_match and kb_match["matched"]:
-        print(f"[kb] hit: '{text_query[:30]}' -> {kb_match['canonical_name']}", file=sys.stderr)
-        result = _build_response_from_kb(kb_match, text_query)
-        return jsonify(result)
-
-    # 2. 兜底:调智谱文字版
-    try:
-        prompt = _build_consult_prompt(text_query)
-        # 文字问诊无图,传空 list(智谱 glm-4v-plus max_tokens 1-2048)
-        print(f"[zhipu] consult (no kb match): text='{text_query[:50]}'", file=sys.stderr)
-        result = _call_zhipu_glm4v([], prompt, max_tokens=1500, timeout=45)
-        # 兜底
-        result.setdefault("is_crop", True)
-        result.setdefault("primary_crop", {"name_zh": "未知", "confidence": 0.3})
-        result.setdefault("candidates", [])
-        result.setdefault("diagnosis", [{
-            "name": "文字描述待确认",
-            "probability": 0.5,
-            "severity": "未知",
-            "reasoning": "基于文字描述的初步判断",
-            "key_visual_clues": [],
-            "uncertainty_reason": "没有图片,建议上传 1-3 张照片获取精准诊断",
-            "need_expert": True,
-        }])
-        result.setdefault("treatment", {
-            "title": "文字问诊建议",
-            "actions": [
-                {"step": 1, "title": "补图", "description": "上传 1-3 张清晰照片(病斑特写/整株/不同角度)"},
-                {"step": 2, "title": "补文字", "description": "描述症状持续时间/扩散速度/受影响面积"},
-            ],
-            "prescription": {
-                "title": "未确诊前不建议盲目用药",
-                "chemicals": [],
-                "safety_warning": "未确诊前不建议盲目用药",
-                "followup": "上传图片后免费重跑诊断",
-            },
-        })
-        result["_is_demo"] = False
-        result["_is_text_only"] = True
-        result["_identified_crop"] = {
-            "primary_crop": result.get("primary_crop"),
-            "candidates": result.get("candidates", []),
-        }
-        result["_chain"] = {
-            "stage1_identified_by": "text_llm",
-            "stage2_diagnosed_by": "zhipu_glm4v",
-            "identified_crop_name": result.get("primary_crop", {}).get("name_zh"),
-            "auto_chainable": True,
-        }
-        return jsonify(result)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"ok": False, "error": "文字问诊异常: " + str(e)}), 500
-
-
-def _diagnose_real(image_files):
-    """真实模式:调智谱 GLM-4V,单次输出 identify + diagnose + treatment"""
-    saved_paths, session_dir = _save_images_to_tmp(image_files, prefix="diagnose")
-    print(f"[diag] _diagnose_real start, {len(saved_paths)} images", file=sys.stderr)
-    try:
-        text_query = (request.form.get("text") or "").strip()
-        crop = (request.form.get("crop") or "").strip()
-        parts = (request.form.get("parts") or "").strip()
-        print(f"[diag] form text='{text_query[:30]}' crop='{crop}'", file=sys.stderr)
-
-        # 构造 diagnose prompt
-        prompt = _build_diagnose_prompt(text_query)
-        print(f"[diag] prompt len={len(prompt)}", file=sys.stderr)
-
-        # 调智谱 GLM-4V(单次调用,一次性输出识别+诊断+方案)
-        # 智谱 glm-4v-plus 限制 max_tokens 1-2048
-        print(f"[zhipu] diagnose: {len(saved_paths)} 张图, text='{text_query[:50]}'", file=sys.stderr)
-        diagnosis = _call_zhipu_glm4v(saved_paths, prompt, max_tokens=2000, timeout=60)
-        print(f"[diag] zhipu OK, keys={list(diagnosis.keys())}", file=sys.stderr)
-
-        # 兜底字段
-        diagnosis.setdefault("is_crop", True)
-        diagnosis.setdefault("primary_crop", {"name_zh": crop or "未识别", "confidence": 0.5})
-        diagnosis.setdefault("candidates", [])
-        diagnosis.setdefault("diagnosis", [])
-        diagnosis.setdefault("treatment", {"title": "", "actions": [], "prescription": {}})
-
-        # 提取 top_diagnosis_name
-        diag_list = diagnosis.get("diagnosis", [])
-        if not diag_list:
-            diag_list = [{"name": "未诊断", "probability": 0, "severity": "未知"}]
-            diagnosis["diagnosis"] = diag_list
-        top_diag = diag_list[0]
-        top_name = top_diag.get("name", "")
-
-        # 构造 prescription(从 treatment 提取)
-        treatment = diagnosis.get("treatment", {})
-        pres = treatment.get("prescription", {})
-        pres_title = pres.get("title", "")
-        # 拼成 markdown 表格
-        pres_lines = []
-        if pres_title:
-            pres_lines.append(f"### {pres_title}")
-        for chem in pres.get("chemicals", []):
-            pres_lines.append(
-                f"- **{chem.get('name', '?')}**: {chem.get('dose', '?')} · {chem.get('method', '?')}"
-                + (f" · 间隔 {chem.get('interval_days', '?')} 天" if chem.get('interval_days') else "")
-                + (f" · 最多 {chem.get('max_times', '?')} 次" if chem.get('max_times') else "")
-            )
-        if pres.get("safety_warning"):
-            pres_lines.append(f"\n⚠️ **{pres['safety_warning']}**")
-        if pres.get("followup"):
-            pres_lines.append(f"\n📅 **复喷节奏**:{pres['followup']}")
-        pres_content = "\n".join(pres_lines) if pres_lines else ""
-
-        # ★ 图片 URL:用 HTTP URL(前端 image 组件可访问)
-        # 路径形式: {PUBLIC_BASE_URL}/uploads/{session_dir_name}/{idx}.{ext}
-        public_base = os.environ.get("PUBLIC_BASE_URL", "https://crop-doctor-backend-5ejy.onrender.com").rstrip("/")
-        image_urls = []
-        for p in saved_paths:
-            # p 形如 /tmp/crop_doctor_uploads/diagnose-1234567890/0.jpg
-            # 取 "diagnose-1234567890/0.jpg" 作为 URL 路径
-            try:
-                rel = Path(p).relative_to(UPLOAD_DIR).as_posix()
-            except Exception:
-                # 兜底:取 basename 拼
-                rel = Path(p).name
-            image_urls.append(f"{public_base}/uploads/{rel}")
-
-        full = {
-            "diagnosis": diagnosis,
-            "top_diagnosis_name": top_name,
-            "prescription": {
-                "title": pres_title,
-                "content": pres_content,
-                "available": bool(pres_title),
-            },
-            "metadata": {
-                "image_count": len(saved_paths),
-                "images": image_urls,
-                "crop": crop or diagnosis.get("primary_crop", {}).get("name_zh"),
-                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                "backend": "zhipu-glm4v",
-            },
-            "_is_demo": False,
-            "_identified_crop": {
-                "primary_crop": diagnosis.get("primary_crop"),
-                "candidates": diagnosis.get("candidates", []),
-            },
-            "_chain": {
-                "stage1_identified": True,
-                "stage2_diagnosed": True,
-                "identified_crop_name": diagnosis.get("primary_crop", {}).get("name_zh"),
-                "auto_chainable": True,
-            },
-        }
-        return jsonify(full)
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print(tb, file=sys.stderr)
-        return jsonify({
-            "ok": False,
-            "error": "诊断服务异常: " + str(e),
-            "traceback": tb[-2000:],  # 最近 2000 字符
-            "type": type(e).__name__,
-        }), 500
-    finally:
-        # 延迟删除(1 小时后),给前端 wx:image 组件足够时间拉图
-        _schedule_cleanup(session_dir, delay_seconds=3600)
+    use_real = request.args.get("real") == "1"
+    print(f"[consult-v2] real={use_real} text='{text_query[:50]}' crop='{user_crop}' loc='{location}'", file=sys.stderr)
+    result = _run_consult_text(text_query, user_crop, location, context_str)
+    if not result.get("ok"):
+        return jsonify(result), 500
+    return jsonify({
+        "ok": True,
+        "version": "2.0.0",
+        "parsed": result.get("parsed", {}),
+        "html": result.get("html"),
+    })
 
 
 # ===== 反馈 =====
