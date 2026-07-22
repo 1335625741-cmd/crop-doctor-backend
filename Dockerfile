@@ -1,6 +1,6 @@
 # ============================================================
 # 征途问诊后端 - Docker 镜像
-# 平台:linux/amd64(兼容 Render / 本地 / HuggingFace Spaces)
+# 平台:linux/amd64(兼容 Render / 微信云托管 / HuggingFace Spaces)
 # ============================================================
 FROM python:3.11-slim
 
@@ -9,11 +9,6 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
-
-# 默认端口 7860(HuggingFace Spaces 强制)
-# Render 会自动注入 PORT=10000 覆盖(本 env 仅作默认值)
-# 本地 Docker 测试: docker run -p 7860:7860 ...
-ENV PORT=80
 
 # 工作目录
 WORKDIR /app
@@ -30,19 +25,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制项目代码
 COPY . /app/
 
-# gunicorn 监听 PORT env(Render=10000, 本地=7860)
-# shell 形式 CMD 让 ${PORT} 变量替换生效
+# ★ 写死端口 80(微信云托管要求)
+#   - 不要用 ${PORT} 变量(gunicorn 26 会嗅探 HF Spaces env 强制 7860)
+#   - 不要用 exec 之外的 shell 形式(变量替换不可控)
+#   - exec 形式直接执行,无 shell 解析,确保 bind 0.0.0.0:80
 EXPOSE 80
 
 # 启动 gunicorn(生产 WSGI)
-# - bind 0.0.0.0:${PORT}(Render 自动注入 PORT=10000,本地默认 7860)
-# - workers 2(免费层 2C 4G 跑 2 个 worker 够用)
+# - workers 2
 # - timeout 120(诊断可能调 AI 比较久)
-# - accesslog 写到 stderr(让 Render log 能看到)
-CMD gunicorn \
-    --bind 0.0.0.0:${PORT} \
-    --workers 2 \
-    --timeout 120 \
-    --access-logfile - \
-    --error-logfile - \
-    app:app
+# - accesslog 写到 stderr
+CMD ["gunicorn", \
+     "--bind", "0.0.0.0:80", \
+     "--workers", "2", \
+     "--timeout", "120", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-", \
+     "app:app"]
