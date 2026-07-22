@@ -617,6 +617,20 @@ def health():
 def debug_echo():
     """看云托管网关到底转发了什么头/body(本地 debug 用)"""
     raw = request.data or b''
+    # ★ 看根目录 + 常见挂载点(找对象存储挂哪了)
+    import os
+    mounts_info = {}
+    for path in ["/", "/data", "/mnt", "/var/storage", "/storage", "/uploads", "/tmp"]:
+        try:
+            exists = os.path.isdir(path)
+            writable = os.access(path, os.W_OK) if exists else False
+            try:
+                contents = os.listdir(path)[:5] if exists else []
+            except Exception:
+                contents = ["<permission denied>"]
+            mounts_info[path] = {"exists": exists, "writable": writable, "sample": contents}
+        except Exception as e:
+            mounts_info[path] = {"error": str(e)}
     info = {
         "method": request.method,
         "content_type": request.content_type,
@@ -624,6 +638,9 @@ def debug_echo():
         "content_length": request.content_length,
         "raw_data_len": len(raw),
         "raw_data_bytes_hex": raw[:50].hex(),
+        "mounts": mounts_info,
+        "db_path": str(DB_PATH),
+        "db_path_reason": DB_PATH_REASON,
         "raw_data_ascii_safe": ''.join(chr(b) if 32 <= b < 127 else '?' for b in raw[:200]),
     }
     return jsonify(info)
