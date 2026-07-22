@@ -37,6 +37,10 @@ import tempfile
 import time
 from pathlib import Path
 
+# DB 路径常量(供 /api/_debug_echo 等需要报路径的地方用)
+# 注意: 完整 db 模块初始化(含 init_db)在文件最下面;这里只取路径常量,不副作用
+from db import DB_PATH, DB_PATH_REASON  # noqa: E402
+
 try:
     import requests as _requests
 except ImportError:
