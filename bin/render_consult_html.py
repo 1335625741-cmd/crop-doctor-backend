@@ -76,7 +76,8 @@ def render_consult_html(data):
              '<meta charset="UTF-8">',
              # P1-40 (2026-07-21 修): title 里 strip markdown 标记 (title 不渲染 HTML)
              # 之前 html_escape 不转 *, ** , 字面 "*玉米丝黑穗病*" 显示在浏览器标签页
-             f'<title>咨询报告 — {html_escape(_re.sub(r"\\*+([^*]+?)\\*+", r"\1", summary[:30]))}</title>',
+             # 2026-07-22: 拆出变量(Python 3.11 f-string 不允许表达式内含 backslash)
+             '<title>咨询报告 — ' + html_escape(_re.sub(r"\\*+([^*]+?)\\*+", r"\1", summary[:30])) + '</title>',
              f'<style>{CSS}</style>',
              '</head>', '<body>', '<div class="wrap">']
 
