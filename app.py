@@ -544,7 +544,7 @@ def serve_upload(filepath):
 #   3. 白名单路径(/api/health, /admin, /uploads/* 等)
 @app.before_request
 def check_auth():
-    PUBLIC_PATHS = {"/api/health", "/admin", "/admin/login", "/api/wechat-login"}
+    PUBLIC_PATHS = {"/", "/api/health", "/admin", "/admin/login", "/api/wechat-login"}
     # /api/admin/* 用自己的 admin token 鉴权(不放进 PUBLIC,但也不要全局 token 拦)
     if request.path.startswith("/api/admin/"):
         return None
@@ -578,6 +578,23 @@ def check_auth():
 
 
 # ===== 健康检查 =====
+@app.route("/", methods=["GET"])
+def root():
+    """根路径:给个简短的 service banner,方便 curl 验证服务起来了"""
+    return jsonify({
+        "service": "crop-doctor-backend",
+        "version": "2.1.0",
+        "ok": True,
+        "endpoints": {
+            "health": "/api/health",
+            "diagnose": "/api/diagnose",
+            "consult": "/api/consult",
+            "feedback": "/api/feedback",
+            "admin": "/admin",
+        },
+    })
+
+
 @app.route("/api/health", methods=["GET"])
 def health():
     # 真实 AI 优先级:智谱 > mavis
