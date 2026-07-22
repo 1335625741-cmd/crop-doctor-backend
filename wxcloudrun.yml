@@ -19,8 +19,15 @@ service:
   livenessProbe:
     path: /api/health
     port: 80
-    initialDelaySeconds: 10
+    initialDelaySeconds: 45   # RAG 路径 import 阶段加载 ~300KB JSON + 244KB markdown,容器启动慢
     periodSeconds: 30
+    failureThreshold: 3       # 允许失败 3 次再重启,别被短暂启动延迟误杀
+  readinessProbe:
+    path: /api/health
+    port: 80
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    failureThreshold: 3
 
 # 构建配置
 build:
