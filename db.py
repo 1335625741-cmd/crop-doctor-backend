@@ -283,11 +283,11 @@ def get_conn():
         conn = sqlite3.connect(BACKEND_CONFIG, timeout=30)
         conn.row_factory = sqlite3.Row
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
+            conn.cursor().execute("PRAGMA journal_mode=WAL")
         except Exception:
             pass
         try:
-            conn.execute("PRAGMA foreign_keys=ON")
+            conn.cursor().execute("PRAGMA foreign_keys=ON")
         except Exception:
             pass
         try:
@@ -321,7 +321,8 @@ def upsert_user(openid, unionid=None, nickname=None, avatar_url=None,
     with get_conn() as conn:
         c = conn.cursor()
         sql_sel = _adapt_sql('SELECT openid, login_count FROM users WHERE openid=?')
-        existing = c.execute(sql_sel, (openid,)).fetchone()
+        c.execute(sql_sel, (openid,))
+        existing = c.fetchone()
         if existing:
             sql_upd = _adapt_sql('''
                 UPDATE users SET
@@ -356,14 +357,16 @@ def touch_user(openid):
         return
     with get_conn() as conn:
         sql = _adapt_sql('UPDATE users SET last_active_at=? WHERE openid=?')
-        conn.execute(sql, (time.time(), openid))
+        conn.cursor().execute(sql, (time.time(), openid))
         conn.commit()
 
 
 def get_user(openid):
     with get_conn() as conn:
         sql = _adapt_sql('SELECT * FROM users WHERE openid=?')
-        row = conn.execute(sql, (openid,)).fetchone()
+        c = conn.cursor()
+        c.execute(sql, (openid,))
+        row = c.fetchone()
         return _row_to_dict(row)
 
 
@@ -378,7 +381,9 @@ def list_users(limit=50, offset=0, time_range=None):
         where_sql = (' WHERE ' + ' AND '.join(wheres)) if wheres else ''
         sql = _adapt_sql(f'SELECT * FROM users{where_sql} ORDER BY last_active_at DESC LIMIT ? OFFSET ?')
         params.extend([limit, offset])
-        rows = conn.execute(sql, params).fetchall()
+        c = conn.cursor()
+        c.execute(sql, params)
+        rows = c.fetchall()
         return [_row_to_dict(r) for r in rows]
 
 
@@ -388,9 +393,13 @@ def count_users(time_range=None):
             cutoff = _time_range_to_cutoff(time_range)
             if cutoff:
                 sql = _adapt_sql('SELECT COUNT(*) FROM users WHERE last_active_at >= ?')
-                return conn.execute(sql, (cutoff,)).fetchone()[0]
+                c = conn.cursor()
+                c.execute(sql, (cutoff,))
+                return c.fetchone()[0]
         sql = _adapt_sql('SELECT COUNT(*) FROM users')
-        return conn.execute(sql).fetchone()[0]
+        c = conn.cursor()
+        c.execute(sql)
+        return c.fetchone()[0]
 
 
 # ============================================================
@@ -429,7 +438,9 @@ def list_diagnoses(limit=50, offset=0, openid=None, time_range=None):
         where_sql = (' WHERE ' + ' AND '.join(wheres)) if wheres else ''
         sql = _adapt_sql(f'SELECT * FROM diagnoses{where_sql} ORDER BY ts DESC LIMIT ? OFFSET ?')
         params.extend([limit, offset])
-        rows = conn.execute(sql, params).fetchall()
+        c = conn.cursor()
+        c.execute(sql, params)
+        rows = c.fetchall()
         return [_row_to_dict(r) for r in rows]
 
 
@@ -445,7 +456,9 @@ def count_diagnoses(openid=None, time_range=None):
                 wheres.append('ts >= ?'); params.append(cutoff)
         where_sql = (' WHERE ' + ' AND '.join(wheres)) if wheres else ''
         sql = _adapt_sql(f'SELECT COUNT(*) FROM diagnoses{where_sql}')
-        return conn.execute(sql, params).fetchone()[0]
+        c = conn.cursor()
+        c.execute(sql, params)
+        return c.fetchone()[0]
 
 
 # ============================================================
@@ -485,7 +498,9 @@ def list_feedbacks(limit=50, offset=0, openid=None, key=None, time_range=None):
         where_sql = (' WHERE ' + ' AND '.join(wheres)) if wheres else ''
         sql = _adapt_sql(f'SELECT * FROM feedbacks{where_sql} ORDER BY ts DESC LIMIT ? OFFSET ?')
         params.extend([limit, offset])
-        rows = conn.execute(sql, params).fetchall()
+        c = conn.cursor()
+        c.execute(sql, params)
+        rows = c.fetchall()
         return [_row_to_dict(r) for r in rows]
 
 
@@ -503,7 +518,9 @@ def count_feedbacks(openid=None, key=None, time_range=None):
                 wheres.append('ts >= ?'); params.append(cutoff)
         where_sql = (' WHERE ' + ' AND '.join(wheres)) if wheres else ''
         sql = _adapt_sql(f'SELECT COUNT(*) FROM feedbacks{where_sql}')
-        return conn.execute(sql, params).fetchone()[0]
+        c = conn.cursor()
+        c.execute(sql, params)
+        return c.fetchone()[0]
 
 
 def _time_range_to_cutoff(time_range):
@@ -528,38 +545,49 @@ def get_stats(time_range=None):
         c = conn.cursor()
         stats = {}
 
-        stats['total_users'] = c.execute(_adapt_sql('SELECT COUNT(*) FROM users')).fetchone()[0]
-        stats['today_active'] = c.execute(
+        c.execute(_adapt_sql('SELECT COUNT(*) FROM users'))
+        stats['total_users'] = c.fetchone()[0]
+        c.execute(
             _adapt_sql('SELECT COUNT(*) FROM users WHERE last_active_at > ?'),
             (time.time() - 86400,)
-        ).fetchone()[0]
-        stats['guest_users'] = c.execute(_adapt_sql('SELECT COUNT(*) FROM users WHERE is_guest=1')).fetchone()[0]
+        )
+        stats['today_active'] = c.fetchone()[0]
+        c.execute(_adapt_sql('SELECT COUNT(*) FROM users WHERE is_guest=1'))
+        stats['guest_users'] = c.fetchone()[0]
 
-        stats['total_diagnoses'] = c.execute(_adapt_sql('SELECT COUNT(*) FROM diagnoses')).fetchone()[0]
-        stats['today_diagnoses'] = c.execute(
+        c.execute(_adapt_sql('SELECT COUNT(*) FROM diagnoses'))
+        stats['total_diagnoses'] = c.fetchone()[0]
+        c.execute(
             _adapt_sql('SELECT COUNT(*) FROM diagnoses WHERE ts > ?'),
             (time.time() - 86400,)
-        ).fetchone()[0]
-        stats['image_diagnoses'] = c.execute(_adapt_sql('SELECT COUNT(*) FROM diagnoses WHERE is_text_only=0')).fetchone()[0]
-        stats['text_diagnoses'] = c.execute(_adapt_sql('SELECT COUNT(*) FROM diagnoses WHERE is_text_only=1')).fetchone()[0]
-        stats['kb_hits'] = c.execute(_adapt_sql('SELECT COUNT(*) FROM diagnoses WHERE is_kb_hit=1')).fetchone()[0]
+        )
+        stats['today_diagnoses'] = c.fetchone()[0]
+        c.execute(_adapt_sql('SELECT COUNT(*) FROM diagnoses WHERE is_text_only=0'))
+        stats['image_diagnoses'] = c.fetchone()[0]
+        c.execute(_adapt_sql('SELECT COUNT(*) FROM diagnoses WHERE is_text_only=1'))
+        stats['text_diagnoses'] = c.fetchone()[0]
+        c.execute(_adapt_sql('SELECT COUNT(*) FROM diagnoses WHERE is_kb_hit=1'))
+        stats['kb_hits'] = c.fetchone()[0]
 
         # 反馈(支持 time_range)
         if cutoff:
-            stats['total_feedbacks'] = c.execute(
-                _adapt_sql('SELECT COUNT(*) FROM feedbacks WHERE ts >= ?'), (cutoff,)).fetchone()[0]
-            fb_dist_rows = c.execute(_adapt_sql('''
+            c.execute(_adapt_sql('SELECT COUNT(*) FROM feedbacks WHERE ts >= ?'), (cutoff,))
+            stats['total_feedbacks'] = c.fetchone()[0]
+            c.execute(_adapt_sql('''
                 SELECT `key`, COUNT(*) as cnt FROM feedbacks
                 WHERE `key` IS NOT NULL AND `key` != '' AND ts >= ?
                 GROUP BY `key` ORDER BY `key`
-            '''), (cutoff,)).fetchall()
+            '''), (cutoff,))
+            fb_dist_rows = c.fetchall()
         else:
-            stats['total_feedbacks'] = c.execute(_adapt_sql('SELECT COUNT(*) FROM feedbacks')).fetchone()[0]
-            fb_dist_rows = c.execute(_adapt_sql('''
+            c.execute(_adapt_sql('SELECT COUNT(*) FROM feedbacks'))
+            stats['total_feedbacks'] = c.fetchone()[0]
+            c.execute(_adapt_sql('''
                 SELECT `key`, COUNT(*) as cnt FROM feedbacks
                 WHERE `key` IS NOT NULL AND `key` != ''
                 GROUP BY `key` ORDER BY `key`
-            ''')).fetchall()
+            '''))
+            fb_dist_rows = c.fetchall()
         fb_dist = {}
         for r in fb_dist_rows:
             d = _row_to_dict(r)
@@ -606,7 +634,7 @@ def get_stats(time_range=None):
 def get_recent_negative_feedbacks(limit=20, time_range='24h'):
     cutoff = _time_range_to_cutoff(time_range) or _time_range_to_cutoff('24h')
     with get_conn() as conn:
-        rows = conn.execute(_adapt_sql('''
+        rows = conn.cursor().execute(_adapt_sql('''
             SELECT * FROM feedbacks
             WHERE `key` IN ('D', 'E') AND ts >= ?
             ORDER BY ts DESC LIMIT ?
