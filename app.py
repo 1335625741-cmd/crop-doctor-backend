@@ -303,38 +303,57 @@ CONSULT_PROMPT_TEMPLATE = """你是资深作物病虫害诊断专家。用户没
 
 用户描述:{text_query}
 
-【任务】综合判断可能是什么病害/虫害/缺素症/生理障碍。
+【任务】综合判断可能是什么病害/虫害/缺素症/生理障碍,给出**方向性**诊断和**方向性**药剂建议。
 
-【输出 JSON 格式(严格)】
+【输出 JSON 格式(严格,必须按 schema 填,chemicals 不能空)】
 {{
   "is_crop": true,
   "primary_crop": {{"name_zh": "(从描述推断,如不明确填'未知')", "confidence": 0.5}},
   "candidates": [],
   "diagnosis": [
     {{
-      "name": "可能病害名",
+      "name": "可能病害名(如:番茄早疫病 / 黄瓜白粉病 / 苹果蚜虫 / 玉米缺氮)",
       "probability": 0.7,
-      "severity": "中",
-      "reasoning": "基于症状描述的判断依据",
-      "key_visual_clues": ["用户提到的症状"],
+      "severity": "高/中/低",
+      "reasoning": "基于症状描述的判断依据(写 1-2 句)",
+      "key_visual_clues": ["用户提到的症状", "典型特征"],
       "uncertainty_reason": "没有图片,建议用户补图确认",
       "need_expert": true
     }}
   ],
   "treatment": {{
-    "title": "建议方案",
+    "title": "方向性建议(无图,仅供参考)",
     "actions": [
-      {{"step": 1, "title": "补图", "description": "上传 1-3 张清晰照片获取精准诊断"}},
-      {{"step": 2, "title": "观察", "description": "记录症状发展(扩散?好转?)"}}
+      {{"step": 1, "title": "补图确认", "description": "上传 1-3 张清晰照片获取精准诊断和具体药剂方案"}},
+      {{"step": 2, "title": "观察记录", "description": "记录症状发展(扩散?好转?),拍照记录"}},
+      {{"step": 3, "title": "初见处置", "description": "摘除最严重的病叶/果,改善通风,降低湿度"}}
     ],
     "prescription": {{
-      "title": "初步建议(需补图确认)",
-      "chemicals": [],
-      "safety_warning": "未确诊前不建议盲目用药",
-      "followup": "上传图片后免费重跑诊断"
+      "title": "方向性药剂建议(无图,仅供参考,需补图确认)",
+      "chemicals": [
+        {{"name": "化学类别或代表性成分(如:三唑类杀菌剂 / 代森锰锌 / 苯醚甲环唑 / 嘧菌酯 / 铜制剂 / 链霉素 / 阿维菌素 / 吡虫啉)", "category": "杀菌剂/杀虫剂/保护剂/治疗剂/叶面肥", "note": "适用方向(1 句话,如:真菌性叶斑方向,雨季前预防性喷雾)"}}
+      ],
+      "safety_warning": "未确诊前不建议盲目用药;严格遵守药剂安全间隔期;采收前 7-14 天停药;佩戴防护用具",
+      "followup": "上传图片后免费重跑诊断,获取精准药剂方案(含商品名/剂量)"
     }}
   }}
 }}
+
+【chemicals 填写原则(必读)】
+- chemicals 数组**必须填 1-3 个**,绝对不能留空
+- 给"方向性"建议(化学类别或代表性成分),**不要给具体商品名/剂量/价格**
+- 按症状方向推断:
+  · 真菌叶斑/早疫/晚疫/炭疽 → 三唑类(苯醚甲环唑、戊唑醇)或甲氧基丙烯酸酯类(嘧菌酯)或保护剂(代森锰锌、百菌清)
+  · 霜霉/疫霉 → 烯酰吗啉 / 霜脲氰 / 甲霜灵 / 铜制剂
+  · 白粉病 → 三唑类(戊唑醇、苯醚甲环唑)或甲氧基丙烯酸酯类(嘧菌酯)
+  · 细菌(叶斑/溃疡/软腐) → 铜制剂(氢氧化铜、硫酸铜钙)或链霉素/中生菌素
+  · 蚜虫/飞虱/粉虱 → 吡虫啉/噻虫嗪/烯啶虫胺
+  · 螨虫(红蜘蛛) → 阿维菌素/哒螨灵/螺螨酯
+  · 鳞翅目害虫(青虫/菜青虫/棉铃虫) → 阿维菌素/甲维盐/氯虫苯甲酰胺
+  · 缺氮(整体发黄) → 尿素叶面喷施
+  · 缺铁(新叶发黄) → 硫酸亚铁/螯合铁
+- 每条 chemicals 必须有 name / category / note 三个字段
+- 即使症状不明确,也给"广谱保护剂(代森锰锌/百菌清)"+ "针对性类别"两条
 
 只输出 JSON。注意 need_expert 通常为 true(没有图,建议补图 + 找专家)。"""
 
@@ -587,7 +606,7 @@ def root():
     """根路径:给个简短的 service banner,方便 curl 验证服务起来了"""
     return jsonify({
         "service": "crop-doctor-backend",
-        "version": "2.2.0",
+        "version": "2.2.1",
         "ok": True,
         "endpoints": {
             "health": "/api/health",
@@ -632,7 +651,7 @@ def health():
     return jsonify({
         "ok": db_status == "ok",  # ★ 2.2.0:db 连不上时 ok=False
         "ts": time.time(),
-        "version": "2.2.0",
+        "version": "2.2.1",
         "mode": "real" if real_backend else "demo",
         "real_backend": real_backend,
         "db_backend": db_backend,
@@ -1080,6 +1099,12 @@ def _run_real_consult_text(text_query, user_crop=None, location=None, context=No
         actions = treatment.get("actions") or []
         primary_crop = ai_result.get("primary_crop") or {}
 
+        # ★ 防御:如果智谱把 chemicals 留空(无图不给药),降级到 mock 模板给方向性建议
+        # 否则前端会看到空药剂表,体验比 mock 还差
+        if not (prescription.get("chemicals") or []):
+            print(f"[zhipu-consult] chemicals 为空,降级到 mock 模板", file=sys.stderr)
+            return _run_consult_text(text_query, user_crop, location, context)
+
         consult_input = {
             "user_question": text_query,
             "summary": (text_query[:30] + "...") if len(text_query) > 30 else text_query,
@@ -1261,7 +1286,7 @@ def diagnose_v2():
     full = result.get("full") or {}
     return jsonify({
         "ok": True,
-        "version": "2.2.0",
+        "version": "2.2.1",
         "image_type": image_type,
         "need_confirm": False,
         "need_confirm_data": None,
@@ -1314,7 +1339,7 @@ def consult_v2():
         return jsonify(result), 500
     return jsonify({
         "ok": True,
-        "version": "2.2.0",
+        "version": "2.2.1",
         "parsed": result.get("parsed", {}),
         "html": result.get("html"),
     })
