@@ -1045,6 +1045,112 @@ def _run_consult_text(text_query, user_crop=None, location=None, context=None):
         return {"ok": False, "error": "文字咨询异常: " + str(e), "traceback": traceback.format_exc()[-1500:]}
 
 
+def _run_real_consult_text(text_query, user_crop=None, location=None, context=None):
+    """文字咨询路径(无图,真 AI):调智谱 GLM-4V 做文字语义分析
+
+    流程:
+    1. 构造 CONSULT_PROMPT_TEMPLATE + 用户 text
+    2. 调智谱(image_paths=[] 走纯文本模式)
+    3. 智谱返回 JSON:{primary_crop, diagnosis:[], treatment:{...}, ...}
+    4. 把智谱结果映射到 consult_input 字段
+    5. 调 render_consult_html.py 渲染 HTML
+    """
+    try:
+        if not _zhipu_available():
+            return {"ok": False, "error": "智谱未配置,无法走真 AI 文字咨询"}
+
+        # 1. 调智谱
+        prompt = _build_consult_prompt(text_query)
+        print(f"[zhipu-consult] text='{text_query[:50]}' crop='{user_crop or ''}'", file=sys.stderr)
+        try:
+            ai_result = _call_zhipu_glm4v([], prompt, max_tokens=1500, timeout=45)
+        except Exception as e:
+            # 智谱调用失败 → 降级到 mock 模板
+            print(f"[zhipu-consult] 智谱调用失败,降级到模板: {e}", file=sys.stderr)
+            return _run_consult_text(text_query, user_crop, location, context)
+
+        # 2. 解析智谱结果 → consult_input
+        # 智谱返回的字段:
+        #   primary_crop: {name_zh, confidence}
+        #   diagnosis: [{name, probability, severity, reasoning, key_visual_clues, uncertainty_reason, need_expert}]
+        #   treatment: {title, actions:[{step,title,description}], prescription:{title, chemicals:[...], safety_warning, followup}}
+        top_diag = (ai_result.get("diagnosis") or [{}])[0]
+        treatment = ai_result.get("treatment") or {}
+        prescription = treatment.get("prescription") or {}
+        actions = treatment.get("actions") or []
+        primary_crop = ai_result.get("primary_crop") or {}
+
+        consult_input = {
+            "user_question": text_query,
+            "summary": (text_query[:30] + "...") if len(text_query) > 30 else text_query,
+            "crop": user_crop or primary_crop.get("name_zh", ""),
+            "location": location or "",
+            "context": context or "",
+            "cause": top_diag.get("reasoning", ""),
+            "treatments": [
+                # 把 prescription.chemicals 转换为 treatments 格式
+                {
+                    "category": "化学防治",
+                    "agents": [c.get("name", "") for c in (prescription.get("chemicals") or [])],
+                    "notes": prescription.get("safety_warning", ""),
+                }
+            ] if prescription.get("chemicals") else [],
+            "spray_schedule": prescription.get("followup", ""),
+            "mixing_rotation": "按 prescription 的 safety_warning 操作,具体轮换见田间实际",
+            "differential": [
+                {"name": d.get("name", ""), "key_diff": " ".join(d.get("key_visual_clues", []))}
+                for d in (ai_result.get("diagnosis") or [])[1:3]
+            ],
+            "symptoms": "、".join(top_diag.get("key_visual_clues", []) or ["见上述分析"]),
+            "ag_control": "\n".join(
+                f"{a.get('step', i+1)}. {a.get('title', '')}:{a.get('description', '')}"
+                for i, a in enumerate(actions)
+            ),
+            "need_expert": bool(top_diag.get("need_expert", True)),
+            "expert_reason": top_diag.get("uncertainty_reason", "文字咨询精度有限,建议结合图片二次确认"),
+            # ★ 关键:把智谱的主诊断名也放到顶层,前端 _buildAiDescription 能拿到
+            "_top_diagnosis_name": top_diag.get("name", "未识别"),
+            "_severity": top_diag.get("severity", "中"),
+            "_primary_crop": primary_crop.get("name_zh", "未识别"),
+            "_is_ai": True,
+        }
+
+        # 3. 调 render_consult_html.py 渲染 HTML
+        consult_json_path = Path(tempfile.gettempdir()) / f"consult_ai_{int(time.time() * 1000)}.json"
+        with open(consult_json_path, "w", encoding="utf-8") as f:
+            json.dump(consult_input, f, ensure_ascii=False, indent=2)
+        output_html = Path(tempfile.gettempdir()) / f"consult_ai_out_{int(time.time() * 1000)}.html"
+        cmd = [
+            sys.executable,
+            str(SKILL_BIN_DIR / "render_consult_html.py"),
+            "-i", str(consult_json_path),
+            "-o", str(output_html),
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace")[-300:]
+            return {"ok": False, "error": "render_consult_html 失败: " + stderr}
+        if not output_html.exists():
+            return {"ok": False, "error": "render_consult_html 未产出文件"}
+        with open(output_html, "r", encoding="utf-8") as f:
+            html = f.read()
+        try:
+            consult_json_path.unlink()
+        except OSError:
+            pass
+        return {
+            "ok": True,
+            "html": html,
+            "parsed": consult_input,
+            "top_diagnosis_name": top_diag.get("name", "未识别"),
+            "severity": top_diag.get("severity", "中"),
+            "primary_crop": primary_crop.get("name_zh", "未识别"),
+        }
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": "真 AI 文字咨询异常: " + str(e), "traceback": traceback.format_exc()[-1500:]}
+
+
 def _build_demo_diagnose(image_files, text_query, user_crop, user_context):
     """demo 模式:返回简单占位结构"""
     if image_files:
@@ -1199,7 +1305,11 @@ def consult_v2():
 
     use_real = request.args.get("real") == "1"
     print(f"[consult-v2] real={use_real} text='{text_query[:50]}' crop='{user_crop}' loc='{location}'", file=sys.stderr)
-    result = _run_consult_text(text_query, user_crop, location, context_str)
+    # ★ 修复 (2026-07-23): use_real=True 时调智谱,False 走模板
+    if use_real and _zhipu_available():
+        result = _run_real_consult_text(text_query, user_crop, location, context_str)
+    else:
+        result = _run_consult_text(text_query, user_crop, location, context_str)
     if not result.get("ok"):
         return jsonify(result), 500
     return jsonify({
