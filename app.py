@@ -621,20 +621,74 @@ def health():
 def debug_echo():
     """看云托管网关到底转发了什么头/body(本地 debug 用)"""
     raw = request.data or b''
-    # ★ 看根目录 + 常见挂载点(找对象存储挂哪了)
     import os
+    import subprocess as _sp
+    # ★ 1) 看根目录 + 常见挂载点(找对象存储挂哪了)
     mounts_info = {}
-    for path in ["/", "/data", "/mnt", "/var/storage", "/storage", "/uploads", "/tmp"]:
+    for path in ["/", "/data", "/mnt", "/var/storage", "/storage", "/uploads", "/tmp", "/home", "/opt"]:
         try:
             exists = os.path.isdir(path)
             writable = os.access(path, os.W_OK) if exists else False
             try:
-                contents = os.listdir(path)[:5] if exists else []
-            except Exception:
-                contents = ["<permission denied>"]
-            mounts_info[path] = {"exists": exists, "writable": writable, "sample": contents}
+                # 完整列表(不限制 5 个)— 关键路径要查全
+                full = os.listdir(path) if exists else []
+                # 区分隐藏文件(.xxx) 和普通文件
+                visible = [x for x in full if not x.startswith('.')]
+                mounts_info[path] = {
+                    "exists": exists,
+                    "writable": writable,
+                    "all_files": full,             # 完整列表(含隐藏)
+                    "visible_count": len(visible), # 普通文件/目录数
+                    "total_count": len(full),      # 总数
+                }
+            except Exception as e:
+                mounts_info[path] = {"exists": exists, "writable": writable, "listdir_error": str(e)}
         except Exception as e:
             mounts_info[path] = {"error": str(e)}
+    # ★ 2) 读 /proc/mounts(内核级挂载表)— 找系统偷偷挂的 FUSE
+    proc_mounts = []
+    try:
+        with open("/proc/mounts", "r") as f:
+            for line in f:
+                # 格式: device mountpoint fstype options dump pass
+                parts = line.strip().split()
+                if len(parts) >= 3:
+                    proc_mounts.append({
+                        "device": parts[0],
+                        "mountpoint": parts[1],
+                        "fstype": parts[2],
+                        "options": parts[3] if len(parts) > 3 else "",
+                    })
+    except Exception as e:
+        proc_mounts = [{"error": str(e)}]
+    # ★ 3) mount 命令输出(看带 fusermount 之类的)
+    mount_cmd = ""
+    try:
+        mount_cmd = _sp.check_output(["mount"], stderr=_sp.STDOUT, timeout=5).decode("utf-8", errors="replace")
+    except Exception as e:
+        mount_cmd = f"<mount 命令失败: {e}>"
+    # ★ 4) 关键挂载点的 statvfs(看是不是真的 mount,有没有容量)
+    statvfs_info = {}
+    for path in ["/", "/data", "/mnt", "/tmp"]:
+        if os.path.isdir(path):
+            try:
+                st = os.statvfs(path)
+                statvfs_info[path] = {
+                    "f_blocks": st.f_blocks,        # 总块数
+                    "f_bfree": st.f_bfree,          # 空闲块
+                    "f_bsize": st.f_bsize,          # 块大小(字节)
+                    "f_files": st.f_files,          # inode 总数
+                    "f_ffree": st.f_ffree,          # 空闲 inode
+                    "total_gb": round(st.f_blocks * st.f_bsize / 1024**3, 2),
+                    "free_gb": round(st.f_bfree * st.f_bsize / 1024**3, 2),
+                }
+            except Exception as e:
+                statvfs_info[path] = {"error": str(e)}
+    # ★ 5) 环境变量里的 storage 提示
+    storage_env = {
+        k: v for k, v in os.environ.items()
+        if any(x in k.upper() for x in ["STORAGE", "MOUNT", "BUCKET", "CFS", "COS", "WX", "TENCENT", "CLOUD"])
+    }
     info = {
         "method": request.method,
         "content_type": request.content_type,
@@ -642,10 +696,15 @@ def debug_echo():
         "content_length": request.content_length,
         "raw_data_len": len(raw),
         "raw_data_bytes_hex": raw[:50].hex(),
+        "raw_data_ascii_safe": ''.join(chr(b) if 32 <= b < 127 else '?' for b in raw[:200]),
         "mounts": mounts_info,
+        "proc_mounts": proc_mounts,
+        "mount_cmd": mount_cmd,
+        "statvfs": statvfs_info,
+        "storage_env": storage_env,
         "db_path": str(DB_PATH),
         "db_path_reason": DB_PATH_REASON,
-        "raw_data_ascii_safe": ''.join(chr(b) if 32 <= b < 127 else '?' for b in raw[:200]),
+        "container_hostname": _sp.check_output(["hostname"]).decode().strip() if os.path.exists("/usr/bin/hostname") else "<no hostname>",
     }
     return jsonify(info)
 
