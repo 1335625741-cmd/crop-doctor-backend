@@ -587,7 +587,7 @@ def root():
     """根路径:给个简短的 service banner,方便 curl 验证服务起来了"""
     return jsonify({
         "service": "crop-doctor-backend",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "ok": True,
         "endpoints": {
             "health": "/api/health",
@@ -603,12 +603,18 @@ def root():
 def health():
     # 真实 AI 优先级:智谱 > mavis
     real_backend = "zhipu-glm4v" if _zhipu_available() else ("mavis" if _matrix_available() else None)
+    # DB 后端(2.2.0 引入 MySQL,可能 mysql / sqlite)
+    try:
+        db_backend = _db.BACKEND if _db else "unknown"
+    except Exception:
+        db_backend = "unknown"
     return jsonify({
         "ok": True,
         "ts": time.time(),
-        "version": "2.1.0",
+        "version": "2.2.0",
         "mode": "real" if real_backend else "demo",
         "real_backend": real_backend,
+        "db_backend": db_backend,
         "zhipu_configured": _zhipu_available(),
         "matrix_configured": _matrix_available(),
         "wechat_configured": bool(WECHAT_APPID and WECHAT_SECRET),
@@ -702,6 +708,7 @@ def debug_echo():
         "mount_cmd": mount_cmd,
         "statvfs": statvfs_info,
         "storage_env": storage_env,
+        "db_backend": _db.BACKEND if _db else "unknown",
         "db_path": str(DB_PATH),
         "db_path_reason": DB_PATH_REASON,
         "container_hostname": _sp.check_output(["hostname"]).decode().strip() if os.path.exists("/usr/bin/hostname") else "<no hostname>",
@@ -1125,7 +1132,7 @@ def diagnose_v2():
     full = result.get("full") or {}
     return jsonify({
         "ok": True,
-        "version": "2.1.0",
+        "version": "2.2.0",
         "image_type": image_type,
         "need_confirm": False,
         "need_confirm_data": None,
@@ -1174,7 +1181,7 @@ def consult_v2():
         return jsonify(result), 500
     return jsonify({
         "ok": True,
-        "version": "2.1.0",
+        "version": "2.2.0",
         "parsed": result.get("parsed", {}),
         "html": result.get("html"),
     })

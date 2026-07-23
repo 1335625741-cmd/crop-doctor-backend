@@ -10,3 +10,8 @@ requests>=2.28
 
 # API 限流(诊断/反馈/登录,防刷量刷智谱)
 flask-limiter>=3.5
+
+# 数据库(2.2.0 起,生产用 MySQL;本地开发不配环境变量自动 fallback 到 SQLite)
+PyMySQL>=1.1.0
+# cryptography 已经被 PyMySQL 需要(AES 解密等),但单独列出来更清楚
+
