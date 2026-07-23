@@ -603,18 +603,41 @@ def root():
 def health():
     # 真实 AI 优先级:智谱 > mavis
     real_backend = "zhipu-glm4v" if _zhipu_available() else ("mavis" if _matrix_available() else None)
-    # DB 后端(2.2.0 引入 MySQL,可能 mysql / sqlite)
+    # DB 后端 + 连接状态(2.2.0 引入 MySQL,可能 mysql / sqlite)
     try:
         db_backend = _db.BACKEND if _db else "unknown"
     except Exception:
         db_backend = "unknown"
+    # 实际测试一下 db 连不连得通(避免 init_db 失败时健康检查误报)
+    db_status = "unknown"
+    db_status_msg = ""
+    try:
+        if db_backend == "mysql":
+            with _db.get_conn() as conn:
+                c = conn.cursor()
+                c.execute("SELECT 1")
+                c.fetchone()
+            db_status = "ok"
+        elif db_backend == "sqlite":
+            with _db.get_conn() as conn:
+                c = conn.cursor()
+                c.execute("SELECT 1")
+                c.fetchone()
+            db_status = "ok"
+        else:
+            db_status = "unknown"
+    except Exception as e:
+        db_status = "error"
+        db_status_msg = f"{type(e).__name__}: {str(e)[:200]}"
     return jsonify({
-        "ok": True,
+        "ok": db_status == "ok",  # ★ 2.2.0:db 连不上时 ok=False
         "ts": time.time(),
         "version": "2.2.0",
         "mode": "real" if real_backend else "demo",
         "real_backend": real_backend,
         "db_backend": db_backend,
+        "db_status": db_status,  # ok / error / unknown
+        "db_status_msg": db_status_msg,  # 错误时填具体原因
         "zhipu_configured": _zhipu_available(),
         "matrix_configured": _matrix_available(),
         "wechat_configured": bool(WECHAT_APPID and WECHAT_SECRET),
@@ -1376,9 +1399,16 @@ def wechat_login():
 
 
 # ===== 启动 =====
-# 初始化 SQLite(每次启动建表)
+# 初始化 DB(每次启动建表)
+# ★ 关键:init_db 失败不能拖死整个 app,否则 gunicorn worker 一直崩 → 502
 import db as _db
-_db.init_db()
+try:
+    _db.init_db()
+    print("[app] DB 初始化 OK,app 启动完成", flush=True)
+except Exception as e:
+    print(f"[app] ⚠️ DB 初始化失败 (app 仍然启动,db 操作会失败): {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+    # ★ 不 raise — 让 app 起来,健康检查能过,排查时不浪费部署时间
+    # 第一次 db 操作时(请求来了)还会报错,但用户能看 stderr 知道原因
 
 
 # ============================================================
